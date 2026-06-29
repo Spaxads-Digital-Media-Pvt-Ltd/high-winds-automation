@@ -1,0 +1,14 @@
+{
+  "urls": {
+    "50k_loans": "https://digipalz.trackog.net/c?oid=3&affid=442",
+    "low_credit": "https://digipalz.trackog.net/c?oid=2&affid=442",
+    "borrow_money": "https://digipalz.trackog.net/c?oid=5&affid=442",
+    "super_personal": "https://digipalz.trackog.net/c?oid=4&affid=442"
+  },
+  "proxy": {
+    "source": "rotating",
+    "rotating_url": "http://tFxQm6EDdVq1B4d3:mobile;us;;;@proxy.froxy.com:9000",
+    "env_list": "http://user:pass@proxy1.example.com:8080,socks5://user:pass@proxy2.example.com:1080"
+  },
+  "scheduled_jobs": []
+}
