@@ -34,7 +34,7 @@ from tqdm import tqdm
 from utils.sheet_handler import SheetHandler
 from utils.proxy_manager import ProxyManager
 from utils.device_manager import DeviceManager
-from core.form_filler import FormFiller, FormFillerError
+from core.form_filler_aef import FormFiller, FormFillerError
 
 # ── Bootstrap ────────────────────────────────────────────────────────
 

@@ -1,2 +1,19 @@
 credentials/credentials.json
 credentials/
+
+# Secrets — .env holds sheet URLs and proxy credentials
+.env
+
+# Python build artefacts
+__pycache__/
+*.py[cod]
+venv/
+venv_arm64_broken/
+
+# Runtime output
+logs/
+screenshots/
+proxies.txt
+
+# OS cruft
+.DS_Store

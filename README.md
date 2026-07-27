@@ -1,6 +1,8 @@
 # 🚀 Lead Automation Engine
 
-A production-ready Python automation system that reads leads from Google Sheets, rotates proxies & device fingerprints per row, fills web forms via Playwright, and writes results back to the sheet.
+Reads leads from Google Sheets, rotates proxy + device fingerprint per attempt,
+fills the **American Emergency Fund** loan application via Playwright, and writes
+the result back to the sheet.
 
 ---
 
@@ -8,159 +10,163 @@ A production-ready Python automation system that reads leads from Google Sheets,
 
 ```
 lead-automation/
-├── main.py                 # Entry point — orchestrates the full pipeline
-├── config.yaml             # All configurable settings (selectors, delays, etc.)
-├── .env.example            # Environment variable template
-├── .env                    # Your actual env vars (git-ignored)
-├── devices_pool.py         # 17 real Android device fingerprints
-├── proxies.txt             # One proxy per line (optional)
+├── app.py                  # Flask multi-engine web UI (primary entry point)
+├── main.py                 # Headless single-pass runner (used by run.sh / Docker)
+├── config.yaml             # Delays, retry, pacing, screenshots, column mapping
+├── .env                    # Secrets — git-ignored
+├── devices_pool.py         # 27 real Android device fingerprints
 ├── credentials/
-│   └── credentials.json  # Google Service Account key
+│   └── credentials.json    # Google Service Account key (git-ignored)
 ├── utils/
-│   ├── __init__.py
 │   ├── sheet_handler.py    # Google Sheets read/write via gspread
 │   ├── proxy_manager.py    # Proxy rotation (file / env / rotating gateway)
 │   ├── device_manager.py   # Device fingerprint builder
-│   └── stealth.py          # Anti-detection JS patches + human-like helpers
+│   ├── stealth.py          # Anti-detection JS patches + human-like helpers
+│   └── lead_pacer.py       # Hour-by-hour lead release scheduler
 ├── core/
-│   ├── __init__.py
-│   └── form_filler.py      # Playwright form automation engine
-├── logs/                   # Structured log files
-├── screenshots/            # Failure/success screenshots
-└── requirements.txt
+│   └── form_filler_aef.py  # americanemergencyfund.com form automation
+├── logs/                   # Structured log files (git-ignored)
+└── screenshots/            # Live preview + failure captures (git-ignored)
 ```
 
 ---
 
 ## ⚡ Quick Start
 
-### 1. Clone & create virtual environment
-
 ```bash
-cd lead-automation
-python3 -m venv venv
-source venv/bin/activate
-```
-
-### 2. Install dependencies
-
-```bash
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
+
+cp credentials.json credentials/credentials.json   # Google service account
+# edit .env with your sheet URL + proxy settings
+
+python app.py            # web UI on http://localhost:5000
+# or
+python main.py           # one headless pass over all pending rows
 ```
 
-### 3. Configure environment
+Share the Google Sheet with the service-account email (Editor access).
 
-```bash
-cp .env.example .env
-# Edit .env with your Google Sheet URL, proxy settings, etc.
-```
+---
 
-### 4. Set up Google Service Account
+## 📋 Sheet Columns
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a project → Enable **Google Sheets API** & **Google Drive API**
-3. Create a **Service Account** → Download the JSON key
-4. Save it as `credentials/credentials.json`
-5. **Share your Google Sheet** with the service account email (Editor access)
+Status columns are created automatically if absent. Lead columns are read with
+tolerant fallbacks — the first name of each pair below is preferred.
 
-### 5. Prepare your Google Sheet
+| Column | Required | Notes |
+|--------|----------|-------|
+| `First Name` | ✅ | letters/spaces/apostrophes/hyphens only |
+| `Last Name` | ✅ | generic values like "test" are rejected by the site |
+| `Email Address` | ✅ | |
+| `Phone Number` | ✅ | US number, area code must start 2–9 |
+| `Date of Birth (DOB)` | ✅ | any common format; age must be 18–120 |
+| `SSN Full` | ✅ | last 4 derived automatically |
+| `Street Address` / `City` / `State` | ✅ | state name or 2-letter code |
+| `ZIP Code` | ✅ | exactly 5 digits |
+| `ABA Routing Number` | ✅ | 9 digits, **must pass the ABA checksum** |
+| `Account Number` | ✅ | 5–18 digits |
+| `Requested Loan Amount ($)` | | clamped to 100–35 000, default 5 000 |
+| `Monthly Net Income ($)` | | mapped to the site's bracket, default 3 000 |
+| `Credit Card Debt` | | mapped to the site's bracket, default "none" |
+| `Years at Address` / `Years at Employer` / `Years at Bank` | | years or months; default "5 years or more" |
+| `Homeowner` / `Military` | | yes/no, default no |
+| `Direct Deposit` | | yes/no, default yes |
+| `Income Source` | | "benefits"-like values → benefits, else employed |
+| `Pay Frequency` | | weekly / bi-weekly / semi-monthly / monthly |
+| `Employer Name` | | default "Employer" |
+| `Driver License / ID Number`, `Driver License State` | | state falls back to `State` |
+| `Account Type` | | checking (default) / savings |
+| `Credit Score Rating` | | word or number; default "not sure" |
+| `Loan Purpose` | | credit-card / debt-consolidation / other |
+| `Status` | ✅ | set to **Pending** for new rows |
 
-Your sheet should have these columns (names are configurable in `config.yaml`):
+Rows failing a client-side rule (ABA checksum, age, phone shape, ZIP length) are
+marked `Failed [missing_data]` **before** a browser is launched, so a bad row
+costs no proxy traffic.
 
-| Column | Description |
-|--------|-------------|
-| `First_Name` | Lead's first name |
-| `Last_Name` | Lead's last name |
-| `Email` | Lead's email |
-| `Phone` | Lead's phone number |
-| `Address` | Street address |
-| `City` | City |
-| `State` | State (abbreviation or full) |
-| `Zip_Code` | ZIP / postal code |
-| `Message` | Optional message field |
-| `Status` | Set to **Pending** for new rows |
-| `Notes` | Auto-filled with result details |
-| `Proxy_Used` | Auto-filled with proxy address |
-| `Last_Attempt` | Auto-filled with timestamp |
-| `Retry_Count` | Auto-filled with retry counter |
-| `Submission_ID` | Auto-filled with unique ID |
-| `Device_Model` | Optional: e.g. "Pixel 8", "Galaxy S24" |
-| `Android_Version` | Optional: e.g. "14", "15" |
-| `Orientation` | Optional: "portrait", "landscape", "random" |
-| `Use_Custom_Device` | "yes" to use the device columns above; else random |
+---
 
-### 6. Add proxies (optional)
+## 🎯 The Target Form
 
-Create a `proxies.txt` file:
+`americanemergencyfund.com` serves a native Bootstrap 5 wizard on the landing
+page — no iframe. One step renders at a time inside `#applicantForm`, advanced
+by `#nextBtn` (which becomes "Request Loan" on the last step).
 
-```
-http://user:pass@proxy1.example.com:8080
-socks5://user:pass@proxy2.example.com:1080
-http://proxy3.example.com:3128
-```
+**Step order is decided server-side per session.** The page injects a
+`missingFields` array; only steps carrying a still-missing field are displayed.
+A returning applicant or a post-validation retry therefore sees a shorter,
+different sequence. `core/form_filler_aef.py` is written accordingly: each
+iteration reads the field names currently rendered and dispatches on those, so
+any order works and skipped or repeated steps are handled naturally. Adding a
+new step means adding one entry to the handler map.
 
-Or set `PROXY_SOURCE=rotating` in `.env` for services like Bright Data, Smartproxy, or IPRoyal.
+Full field/value reference is in the module docstring of
+[`core/form_filler_aef.py`](core/form_filler_aef.py).
 
-### 7. Configure form selectors
+**Completion** is detected by URL: `/?cmd=RenderResult&uuid=…` (approved, or
+declined with offers) or a redirect to `offer.requestedresults.com` (declined /
+rejected / processing error). Both are recorded as delivered, with the specific
+outcome written to the sheet's `Notes` column.
 
-Edit `config.yaml` → `target.form_fields` to map your sheet columns to CSS selectors on the target form:
+---
 
-```yaml
-target:
-  url: "https://example.com/apply"
-  form_fields:
-    First_Name: "input[name='first_name']"
-    Email: "input[name='email']"
-    # ... add your selectors
-  submit_button: "button[type='submit']"
-  success_indicator: ".thank-you-message"
-```
+## ⚠️ Known Blocker: Anura Bot Detection
 
-### 8. Run
+The site loads `script.anura.io`, a commercial ad-fraud detection service.
+**With that script active, the headless Chromium renderer crashes reproducibly**
+part-way through page load — the form never renders and no lead can be filled.
 
-```bash
-python main.py
-```
+Verified by isolation:
+
+| Condition | Result |
+|-----------|--------|
+| Headless, `anura.io` reachable | renderer crash, form never renders |
+| Headless, `anura.io` blocked at the network layer | loads normally, step 0 renders |
+
+The crash is caused by the fraud-detection script, not by the site's own code,
+the proxy configuration, or the device fingerprint.
+
+Anura exists specifically to identify non-human form submissions, so suppressing
+it is not a supported configuration of this tool and is deliberately not
+implemented. If you have a commercial relationship with this advertiser, the
+practical routes forward are a server-to-server posting agreement or an
+allow-listed integration — ask your affiliate manager. The filler itself is
+complete and will work as soon as the page renders.
 
 ---
 
 ## 🛡️ Anti-Detection Features
 
-- **Stealth JS injection** — Hides `navigator.webdriver`, spoofs WebGL, canvas, plugins
-- **Real device fingerprints** — 17 devices (Pixel, Galaxy, OnePlus, Xiaomi, etc.)
-- **Human-like typing** — Variable inter-key delays with random micro-pauses
-- **Mouse movement** — Random cursor movement between form fields
-- **Random scrolling** — Natural scroll behaviour before form filling
-- **Per-row rotation** — Fresh proxy + fingerprint for every single row
-- **Viewport jitter** — Randomised dimensions within realistic ranges
-- **Locale/timezone/color-scheme** — Randomised per context
+- Stealth JS injection — hides `navigator.webdriver`, spoofs WebGL / canvas / plugins
+- 27 real Android device fingerprints (Pixel, Galaxy, OnePlus, Xiaomi…)
+- Human-like typing with variable inter-key delays
+- Per-attempt proxy + fingerprint rotation
+- Randomised viewport, locale, timezone, colour scheme, carrier
 
 ---
 
-## ⚙️ Configuration Reference
+## ⚙️ Configuration
 
-### `.env` variables
+### `.env`
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | `credentials/credentials.json` | Path to SA key |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | `credentials/credentials.json` | SA key path |
 | `GOOGLE_SHEET_URL` | — | Sheet URL or ID |
 | `GOOGLE_SHEET_WORKSHEET` | `Sheet1` | Tab name |
-| `PROXY_SOURCE` | `file` | `file`, `env`, or `rotating` |
-| `PROXY_LIST` | — | Comma-separated proxies (if source=env) |
+| `SHEET_URL_AEF` / `SHEET_WS_AEF` | — | Per-offer override; blank falls back to the two above |
+| `PROXY_SOURCE` | `file` | `file`, `env`, `rotating`, or `none` |
+| `PROXY_LIST` | — | Comma-separated proxies (source=env) |
 | `ROTATING_PROXY_URL` | — | Single rotating endpoint |
-| `HEADLESS` | `true` | Run browser headless |
-| `LOG_LEVEL` | `INFO` | DEBUG, INFO, WARNING, ERROR |
+| `HEADLESS` | `true` | The web UI always forces this to `true` |
+| `LOG_LEVEL` | `INFO` | DEBUG / INFO / WARNING / ERROR |
 
-### `config.yaml` sections
+### `config.yaml`
 
-- **`target`** — URL, form selectors, submit button, success indicator
-- **`retry`** — max_retries, backoff_base, backoff_max
-- **`delays`** — typing speed, action pauses, page load wait
-- **`device_defaults`** — viewport ranges, random locale/timezone toggles
-- **`screenshots`** — on_failure, on_success, directory
-- **`sheet_columns`** — map internal names to your actual column headers
+`target` (URL, timeout) · `form.max_steps` · `retry` · `pacing` · `delays` ·
+`device_defaults` · `screenshots` · `logging` · `sheet_columns`
 
 ---
 
@@ -168,12 +174,25 @@ python main.py
 
 ```
 Pending → In Progress → Success
-                      → Failed  (after max retries exhausted)
-                      → Retry   (intermediate, will be retried)
+                      → Failed   (missing_data, or retries exhausted)
+                      → Retry    (intermediate, will be retried)
+                      → Stopped  (user pressed Stop mid-lead)
 ```
+
+---
+
+## 🔐 Security Note
+
+`app.py` binds `0.0.0.0:5000` with the Werkzeug development server and has **no
+authentication**. The sheets behind it hold SSNs, dates of birth, driver's
+licence numbers and bank account details, and `/api/config` returns proxy
+credentials. Bind it to localhost, or put authentication and a production WSGI
+server in front of it, before exposing it anywhere.
 
 ---
 
 ## 📝 License
 
-This project is for educational and authorized use only. Always ensure you have permission to automate form submissions on any target website.
+For authorized use only. Ensure you have permission to automate submissions on
+any target website, and that every lead you submit has consented to the
+application being made on their behalf.

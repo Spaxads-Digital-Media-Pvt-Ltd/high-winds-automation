@@ -4,13 +4,18 @@
 
 # --- Target Form ---
 target:
-  url: "https://digipalz.trackog.net/c?oid=3&affid=442"  # Target URL
+  url: "https://www.americanemergencyfund.com/"  # Target URL
 
-  # The form is a multi-step iframe form — selectors are hardcoded in form_filler.py
-  # (form_fields section not used for this target)
+  # Native Bootstrap wizard on the landing page (no iframe).  The step order is
+  # decided server-side per session, so core/form_filler_aef.py dispatches on the
+  # field names currently rendered rather than on a fixed step index.
 
   # Timeout (seconds) to wait for navigation
   page_timeout: 60
+
+# --- Form behaviour ---
+form:
+  max_steps: 40                 # safety cap on wizard iterations per lead
 
 # --- Retry & Backoff ---
 retry:

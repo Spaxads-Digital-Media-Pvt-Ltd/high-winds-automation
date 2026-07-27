@@ -1,15 +1,11 @@
 {
   "urls": {
-    "50k_loans": "https://50kloans.com/",
-    "low_credit": "https://lowcreditfinance.com/",
-    "borrow_money": "https://borrowmoney.us/",
-    "super_personal": "https://simacash.com/",
-    "simacash": "https://digipalz.trackog.net/c?oid=34&affid=442"
+    "american_emergency_fund": "https://www.americanemergencyfund.com/"
   },
   "proxy": {
     "source": "none",
-    "rotating_url": "http://tFxQm6EDdVq1B4d3:mobile;us;;;@proxy.froxy.com:9000",
-    "env_list": "http://user:pass@proxy1.example.com:8080,socks5://user:pass@proxy2.example.com:1080"
+    "rotating_url": "",
+    "env_list": ""
   },
   "scheduled_jobs": []
 }

@@ -37,45 +37,13 @@ app = Flask(__name__)
 
 # ── Offers registry ───────────────────────────────────────────────────────────
 OFFERS: dict[str, dict] = {
-    "50k_loans": {
-        "name":          "50k Loans",
-        "url":           "https://digipalz.trackog.net/c?oid=3&affid=442",
-        "filler":        "core.form_filler",
+    "american_emergency_fund": {
+        "name":          "American Emergency Fund",
+        "url":           "https://www.americanemergencyfund.com/",
+        "filler":        "core.form_filler_aef",
         "color":         "#38bdf8",
-        "sheet_url_env": "SHEET_URL_50K",
-        "sheet_ws_env":  "SHEET_WS_50K",
-    },
-    "low_credit": {
-        "name":          "Low Credit Finance",
-        "url":           "https://digipalz.trackog.net/c?oid=2&affid=442",
-        "filler":        "core.form_filler_lowcredit",
-        "color":         "#4ade80",
-        "sheet_url_env": "SHEET_URL_LOW_CREDIT",
-        "sheet_ws_env":  "SHEET_WS_LOW_CREDIT",
-    },
-    "borrow_money": {
-        "name":          "BorrowMoney",
-        "url":           "https://digipalz.trackog.net/c?oid=5&affid=442",
-        "filler":        "core.form_filler_borrowmoney",
-        "color":         "#fb923c",
-        "sheet_url_env": "SHEET_URL_BORROW_MONEY",
-        "sheet_ws_env":  "SHEET_WS_BORROW_MONEY",
-    },
-    "super_personal": {
-        "name":          "Super Personal Finder",
-        "url":           "https://digipalz.trackog.net/c?oid=4&affid=442",
-        "filler":        "core.form_filler_superpersonal",
-        "color":         "#c084fc",
-        "sheet_url_env": "SHEET_URL_SUPER_PERSONAL",
-        "sheet_ws_env":  "SHEET_WS_SUPER_PERSONAL",
-    },
-    "simacash": {
-        "name":          "SimaCash",
-        "url":           "https://digipalz.trackog.net/c?oid=34&affid=442",
-        "filler":        "core.form_filler_simacash",
-        "color":         "#f472b6",
-        "sheet_url_env": "SHEET_URL_SIMACASH",
-        "sheet_ws_env":  "SHEET_WS_SIMACASH",
+        "sheet_url_env": "SHEET_URL_AEF",
+        "sheet_ws_env":  "SHEET_WS_AEF",
     },
 }
 
