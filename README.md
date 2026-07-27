@@ -80,11 +80,25 @@ tolerant fallbacks — the first name of each pair below is preferred.
 | `Account Type` | | checking (default) / savings |
 | `Credit Score Rating` | | word or number; default "not sure" |
 | `Loan Purpose` | | credit-card / debt-consolidation / other |
+| `Bank Name` | | only used if the site ever renders the field; it normally derives this from the routing number |
+| `Use_Custom_Device` | | `yes` to pin the fingerprint to the three columns below, else random |
+| `Device_Model` / `Android_Version` / `Orientation` | | e.g. `Pixel 8` / `14` / `portrait`\|`landscape`\|`random` |
 | `Status` | ✅ | set to **Pending** for new rows |
+
+**A blank `Status` also counts as pending** — a pasted row with no status will be
+picked up on the next run. Set it to anything else to park a row.
+
+The engine writes back `Status`, `Notes`, `Proxy_Used`, `IP`, `Last_Attempt`,
+`Retry_Count` and `Submission_ID`; these are created automatically if absent.
 
 Rows failing a client-side rule (ABA checksum, age, phone shape, ZIP length) are
 marked `Failed [missing_data]` **before** a browser is launched, so a bad row
 costs no proxy traffic.
+
+Keep `SSN Full`, `ABA Routing Number`, `Account Number`, `ZIP Code` and the phone
+columns formatted as **plain text** in Sheets, or leading zeros are silently
+dropped (`021000021` → `21000021`, which then fails the ABA checksum). The
+provisioned sheet already has this formatting applied.
 
 ---
 
