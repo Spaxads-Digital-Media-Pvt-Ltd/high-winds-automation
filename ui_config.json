@@ -7,5 +7,9 @@
     "rotating_url": "",
     "env_list": ""
   },
-  "scheduled_jobs": []
+  "scheduled_jobs": [],
+  "browser": {
+    "channel": "chrome",
+    "headless": true
+  }
 }

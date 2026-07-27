@@ -144,6 +144,7 @@ class FormFiller:
         self._ss_dir = Path(config.get("screenshots", {}).get("directory", "screenshots"))
         self._ss_dir.mkdir(parents=True, exist_ok=True)
         self._max_steps = int(config.get("form", {}).get("max_steps", 40))
+        self._crashed = False   # per-row; reset at the top of process_row
 
     # ------------------------------------------------------------------ public
 
@@ -162,21 +163,46 @@ class FormFiller:
 
         url = (self._target.get("url") or "https://www.americanemergencyfund.com/").strip()
         page: Page | None = None
+        self._crashed = False
 
         with sync_playwright() as pw:
             launch_args: dict[str, Any] = {
                 "headless": headless,
                 "args": ["--no-sandbox", "--disable-dev-shm-usage"],
             }
+            # Playwright's *bundled* Chromium reproducibly crashes its renderer on
+            # this site part-way through loading the third-party fraud-detection
+            # script — headless and headed alike.  A stock Google Chrome install
+            # runs the identical page without trouble, so we launch that channel
+            # by default.  Set BROWSER_CHANNEL=chromium to force the bundled
+            # build (expect crashes on this target).
+            channel = os.getenv("BROWSER_CHANNEL", "chrome").strip().lower()
+            if channel and channel not in ("chromium", "bundled", "default"):
+                launch_args["channel"] = channel
             if proxy_url:
                 launch_args["proxy"] = ProxyManager.to_playwright_proxy(proxy_url)
 
-            browser: Browser = pw.chromium.launch(**launch_args)
+            try:
+                browser: Browser = pw.chromium.launch(**launch_args)
+            except Exception as exc:
+                if "channel" not in launch_args:
+                    raise
+                raise FormFillerError(
+                    f"Could not launch browser channel '{channel}': {exc}. "
+                    f"Install Google Chrome, or set BROWSER_CHANNEL=chromium to use "
+                    f"Playwright's bundled build (which crashes on this target).",
+                    error_type="browser_launch",
+                ) from exc
             try:
                 ctx_args = self._clean_fingerprint(fingerprint)
                 context: BrowserContext = browser.new_context(**ctx_args)
                 page = context.new_page()
-                page.on("crash", lambda _p: log.error("form.page_crashed", row=row_number))
+
+                def _on_crash(_p: Page) -> None:
+                    self._crashed = True
+                    log.error("form.page_crashed", row=row_number)
+
+                page.on("crash", _on_crash)
                 inject_stealth(page, fingerprint)
 
                 log.info("form.navigating", url=url, row=row_number)
@@ -213,10 +239,7 @@ class FormFiller:
                         pass
                 raise FormFillerError(str(exc), error_type=error_type) from exc
             finally:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
+                self._close_browser(browser)
 
     # --------------------------------------------------------------- navigation
 
@@ -330,13 +353,26 @@ class FormFiller:
             log.info("form.step", step=step_num, fields=sig[:70], row=row_number)
             self._live(page)
 
-            handled = self._handle_step(page, names, f)
-            if not handled:
+            res = self._handle_step(page, names, f)
+            if not res["known"]:
                 self._screenshot(page, row_number, f"unhandled_{step_num}")
                 raise FormFillerError(
-                    f"No handler for step {step_num} (fields: {sig})",
-                    error_type="stuck",
+                    f"Unrecognised step {step_num} — the site is asking for "
+                    f"fields this filler does not handle: {sig}",
+                    error_type="unhandled_step",
                 )
+            if not res["filled"]:
+                # Every field was recognised but none would take its value —
+                # usually a mapped option the site does not offer for this lead.
+                self._screenshot(page, row_number, f"unfilled_{step_num}")
+                raise FormFillerError(
+                    f"Could not set any field on step {step_num}: {res['failed']} "
+                    f"(value rejected or option missing)",
+                    error_type="field_rejected",
+                )
+            if res["failed"]:
+                log.warning("form.partial_step", step=step_num,
+                            filled=res["filled"], failed=res["failed"], row=row_number)
 
             self._action_pause()
             self._click_next(page)
@@ -385,22 +421,22 @@ class FormFiller:
             "bname":          lambda: self._text(page, "bname", f["bank_name"]),
         }
 
-        any_handled = False
+        known, filled, failed = [], [], []
         for name in names:
             fn = handlers.get(name)
             if fn is None:
-                # customLoanAmount is driven by the loanreqamt handler; unknown
-                # names are logged so a new step shows up in the run log rather
-                # than silently failing the lead.
+                # customLoanAmount is driven by the loanreqamt handler; anything
+                # else unknown means the site added a step we do not cover.
                 if name != "customLoanAmount":
                     log.warning("form.unknown_field", field=name)
                 continue
+            known.append(name)
             try:
-                if fn():
-                    any_handled = True
+                (filled if fn() else failed).append(name)
             except Exception as e:
+                failed.append(name)
                 log.warning("form.field_error", field=name, error=str(e)[:90])
-        return any_handled
+        return {"known": known, "filled": filled, "failed": failed}
 
     # ------------------------------------------------------------- interactions
 
@@ -843,6 +879,24 @@ class FormFiller:
         return "13"
 
     # ---------------------------------------------------------------- utilities
+
+    def _close_browser(self, browser: Browser) -> None:
+        """Shut the browser down without ever blocking the engine thread.
+
+        A Chromium renderer that has crashed never acknowledges close(), so the
+        call would hang forever and the Stop button could not reach the thread.
+        Playwright's sync API is greenlet-based and thread-affine, so closing on
+        a watchdog thread is not an option either — it corrupts the event loop.
+        Instead: skip close() entirely on a crashed target and let the
+        sync_playwright() context exit reap the driver and its children.
+        """
+        if self._crashed:
+            log.warning("form.skip_close", msg="renderer crashed; leaving teardown to the driver")
+            return
+        try:
+            browser.close()
+        except Exception:
+            pass
 
     def _screenshot(self, page: Page, row: int, label: str) -> None:
         try:

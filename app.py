@@ -98,6 +98,28 @@ def _apply_proxy_env(proxy: dict) -> None:
         Path("proxies.txt").write_text(proxy["file_text"])
 
 
+def _current_browser_config() -> dict:
+    """Live browser settings (engine reads these from the environment)."""
+    return {
+        "channel":  os.getenv("BROWSER_CHANNEL", "chrome").strip().lower() or "chrome",
+        "headless": os.getenv("HEADLESS", "true").strip().lower() != "false",
+    }
+
+
+def _apply_browser_env(browser: dict) -> None:
+    """Push browser settings into the environment for the next engine start.
+
+    Channel matters on this target: Playwright's bundled Chromium crashes its
+    renderer on the offer's fraud-detection script, while a stock Google Chrome
+    install loads the same page cleanly.  'chrome' is therefore the default.
+    """
+    channel = (browser.get("channel") or "chrome").strip().lower()
+    os.environ["BROWSER_CHANNEL"] = channel
+    headless = browser.get("headless")
+    if headless is not None:
+        os.environ["HEADLESS"] = "true" if headless else "false"
+
+
 def _apply_config(cfg: dict) -> None:
     """Overlay a saved ui_config dict onto the live OFFERS + environment."""
     for oid, url in (cfg.get("urls") or {}).items():
@@ -105,6 +127,8 @@ def _apply_config(cfg: dict) -> None:
             OFFERS[oid]["url"] = url
     if cfg.get("proxy"):
         _apply_proxy_env(cfg["proxy"])
+    if cfg.get("browser"):
+        _apply_browser_env(cfg["browser"])
 
 
 def _test_proxy(proxy_url: str | None) -> dict:
@@ -337,9 +361,14 @@ def _run_engine(offer_id: str, target_url: str) -> None:
     batch_interval = int(run_opts.get("batch_interval") or 0)
     _tl.offer_id = offer_id
 
-    # Flask UI always runs browsers headless — the live preview is streamed into
-    # the offer card via live_view.png polling, so no external window should open.
-    os.environ["HEADLESS"] = "true"
+    # Browser mode comes from Settings (persisted in ui_config.json).  Headless
+    # is the default — the live preview is streamed into the offer card via
+    # live_view.png polling, so no window is needed.  Headed is available for
+    # watching a run locally; it cannot be used on a headless server without a
+    # virtual display.
+    _apply_browser_env(_load_ui_config().get("browser") or _current_browser_config())
+    _log(offer_id, f"INFO  Browser: {os.getenv('BROWSER_CHANNEL', 'chrome')} "
+                   f"({'headless' if os.getenv('HEADLESS', 'true') != 'false' else 'headed'})")
 
     try:
         filler_module_path = OFFERS[offer_id]["filler"]
@@ -1081,8 +1110,41 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
     </div>
     <div class="tabs">
       <button class="tab active" id="tab-proxy" onclick="switchTab('proxy')">Proxy</button>
+      <button class="tab" id="tab-browser" onclick="switchTab('browser')">Browser</button>
       <button class="tab" id="tab-urls" onclick="switchTab('urls')">Target URLs</button>
       <button class="tab" id="tab-schedule" onclick="switchTab('schedule')">Schedule</button>
+    </div>
+
+    <div class="tab-body" id="body-browser" style="display:none">
+      <div class="src-block">
+        <label class="fld-lbl">Browser Engine</label>
+        <select id="br-channel" class="inp">
+          <option value="chrome">Google Chrome &mdash; recommended</option>
+          <option value="chromium">Chromium (Playwright bundled)</option>
+          <option value="msedge">Microsoft Edge</option>
+        </select>
+        <div class="hint">
+          Playwright's bundled Chromium crashes on this offer's fraud-detection
+          script, headless and headed alike. Stock Google Chrome loads the same
+          page cleanly &mdash; keep this on <b>chrome</b> unless you are testing.
+        </div>
+      </div>
+      <div class="src-block">
+        <label class="fld-lbl">Window Mode</label>
+        <select id="br-headless" class="inp">
+          <option value="true">Headless &mdash; no window (required on a server)</option>
+          <option value="false">Headed &mdash; show the browser window</option>
+        </select>
+        <div class="hint">
+          Headless is the default; the live preview in each card streams the same
+          view. Headed only works on a desktop with a display attached.
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="m-btn ghost" onclick="testBrowser()">Test Against Offer</button>
+        <button class="m-btn primary" onclick="saveBrowser()">Save &amp; Apply</button>
+      </div>
+      <div class="result" id="br-result"></div>
     </div>
 
     <div class="tab-body" id="body-proxy">
@@ -1379,7 +1441,7 @@ function openSettings()  { document.getElementById('settings-modal').style.displ
 function closeSettings() { document.getElementById('settings-modal').style.display = 'none'; }
 
 function switchTab(t) {
-  ['proxy', 'urls', 'schedule'].forEach(x => {
+  ['proxy', 'browser', 'urls', 'schedule'].forEach(x => {
     document.getElementById('tab-'  + x).classList.toggle('active', x === t);
     document.getElementById('body-' + x).style.display = (x === t) ? 'block' : 'none';
   });
@@ -1401,6 +1463,11 @@ async function loadConfig() {
   document.getElementById('px-list').value      = p.env_list || '';
   document.getElementById('px-file-text').value = CONFIG.proxies_txt || '';
   onSourceChange();
+
+  const b = CONFIG.browser || {};
+  document.getElementById('br-channel').value  = b.channel || 'chrome';
+  document.getElementById('br-headless').value = (b.headless === false) ? 'false' : 'true';
+  document.getElementById('br-result').textContent = '';
 
   const wrap = document.getElementById('url-cards');
   wrap.innerHTML = '';
@@ -1478,6 +1545,35 @@ async function saveProxy() {
   }).then(r => r.json()).catch(() => ({ ok: false }));
   const r = document.getElementById('px-result');
   if (d.ok) { r.className = 'result ok-res';  r.textContent = '✅ Proxy saved — applies on next Start'; }
+  else      { r.className = 'result err-res'; r.textContent = '❌ ' + (d.msg || 'save failed'); }
+}
+
+async function testBrowser() {
+  const r = document.getElementById('br-result');
+  r.className = 'result'; r.textContent = 'Launching browser and loading the offer… (up to 30s)';
+  const body = {
+    channel:  document.getElementById('br-channel').value,
+    headless: document.getElementById('br-headless').value === 'true',
+  };
+  const d = await fetch('/api/browser/test', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(r => r.json()).catch(() => ({ success: false, error: 'network error' }));
+  if (d.success) { r.className = 'result ok-res';  r.textContent = '✅ ' + d.msg; }
+  else           { r.className = 'result err-res'; r.textContent = '❌ ' + (d.error || 'failed'); }
+}
+
+async function saveBrowser() {
+  const body = {
+    channel:  document.getElementById('br-channel').value,
+    headless: document.getElementById('br-headless').value === 'true',
+  };
+  const d = await fetch('/api/config/browser', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(r => r.json()).catch(() => ({ ok: false }));
+  const r = document.getElementById('br-result');
+  if (d.ok) { r.className = 'result ok-res';  r.textContent = '✅ Browser settings saved — applies on next Start'; }
   else      { r.className = 'result err-res'; r.textContent = '❌ ' + (d.msg || 'save failed'); }
 }
 
@@ -1928,11 +2024,120 @@ def api_config():
     txt = Path("proxies.txt").read_text() if Path("proxies.txt").exists() else ""
     return jsonify({
         "proxy":        _current_proxy_config(),
+        "browser":      _current_browser_config(),
         "urls":         {oid: o["url"] for oid, o in OFFERS.items()},
         "default_urls": _DEFAULT_URLS,
         "offers":       {oid: o["name"] for oid, o in OFFERS.items()},
         "proxies_txt":  txt,
     })
+
+
+@app.route("/api/config/browser", methods=["POST"])
+def api_config_browser():
+    data = request.get_json(silent=True) or {}
+    channel = (data.get("channel") or "chrome").strip().lower()
+    if channel not in ("chrome", "chromium", "msedge", "chrome-beta"):
+        return jsonify({"ok": False, "msg": f"Unsupported browser channel: {channel}"})
+    browser = {"channel": channel, "headless": bool(data.get("headless", True))}
+    _apply_browser_env(browser)
+    cfg = _load_ui_config()
+    cfg["browser"] = browser
+    _save_ui_config(cfg)
+    return jsonify({"ok": True, "browser": browser})
+
+
+# Probe body for /api/browser/test.  Run out of process because a crashed
+# renderer makes browser.close() block indefinitely — in-process that would
+# wedge the Flask worker thread with no way to recover.
+_BROWSER_PROBE = r"""
+import json, sys, time
+from playwright.sync_api import sync_playwright
+channel, headless, url = sys.argv[1], sys.argv[2] == "1", sys.argv[3]
+crashed = {"v": False}
+rendered = False
+try:
+    with sync_playwright() as pw:
+        kw = {"headless": headless, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
+        if channel not in ("chromium", "bundled", "default"):
+            kw["channel"] = channel
+        b = pw.chromium.launch(**kw)
+        p = b.new_page(
+            user_agent="Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/125.0.6422.165 Mobile Safari/537.36",
+            viewport={"width": 412, "height": 915}, is_mobile=True, has_touch=True)
+        p.on("crash", lambda _p: crashed.__setitem__("v", True))
+        try:
+            p.goto(url, wait_until="domcontentloaded", timeout=40000)
+        except Exception:
+            pass
+        for _ in range(8):
+            time.sleep(2)
+            if crashed["v"]:
+                break
+            try:
+                rendered = bool(p.evaluate(
+                    "() => { const f = document.getElementById('applicantForm');"
+                    "        return !!f && f.querySelectorAll('input,select').length > 0; }"))
+            except Exception:
+                if crashed["v"]:
+                    break
+            if rendered:
+                break
+        print("RESULT" + json.dumps({"crashed": crashed["v"], "rendered": rendered}), flush=True)
+        try:
+            b.close()
+        except Exception:
+            pass
+except Exception as e:
+    print("RESULT" + json.dumps({"error": str(e)[:200]}), flush=True)
+"""
+
+
+@app.route("/api/browser/test", methods=["POST"])
+def api_browser_test():
+    """Launch the configured browser against the offer URL and report whether the
+    page renders — this target crashes some Chromium builds outright."""
+    import subprocess
+    import sys
+
+    data = request.get_json(silent=True) or {}
+    channel = (data.get("channel") or "chrome").strip().lower()
+    headless = bool(data.get("headless", True))
+    url = next(iter(OFFERS.values()))["url"]
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _BROWSER_PROBE, channel, "1" if headless else "0", url],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        out, _ = proc.communicate(timeout=90)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, _ = proc.communicate()
+        return jsonify({"success": False,
+                        "error": f"{channel}: timed out — the browser hung "
+                                 f"(a crashed renderer does not shut down cleanly)."})
+
+    payload: dict = {}
+    for line in (out or "").splitlines():
+        if line.startswith("RESULT"):
+            try:
+                payload = json.loads(line[len("RESULT"):])
+            except ValueError:
+                pass
+    if not payload:
+        tail = (out or "").strip().splitlines()[-1:] or ["no output"]
+        return jsonify({"success": False, "error": f"{channel}: probe failed — {tail[0][:180]}"})
+    if payload.get("error"):
+        return jsonify({"success": False, "error": f"{channel}: {payload['error']}"})
+    if payload.get("crashed"):
+        return jsonify({"success": False,
+                        "error": f"{channel}: renderer crashed before the form rendered. "
+                                 f"Use the 'chrome' channel for this target."})
+    if not payload.get("rendered"):
+        return jsonify({"success": False,
+                        "error": f"{channel}: page loaded but the form did not render in time."})
+    return jsonify({"success": True, "msg": f"{channel} loaded the form successfully."})
 
 
 @app.route("/api/config/proxy", methods=["POST"])

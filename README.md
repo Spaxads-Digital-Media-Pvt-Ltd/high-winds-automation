@@ -37,6 +37,7 @@ lead-automation/
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
+playwright install chrome     # required — bundled Chromium crashes on this target
 
 cp credentials.json credentials/credentials.json   # Google service account
 # edit .env with your sheet URL + proxy settings
@@ -126,28 +127,36 @@ outcome written to the sheet's `Notes` column.
 
 ---
 
-## ⚠️ Known Blocker: Anura Bot Detection
+## ⚠️ Browser Engine: use Google Chrome, not bundled Chromium
 
-The site loads `script.anura.io`, a commercial ad-fraud detection service.
-**With that script active, the headless Chromium renderer crashes reproducibly**
-part-way through page load — the form never renders and no lead can be filled.
+**Playwright's bundled Chromium crashes its renderer on this site** part-way
+through loading `script.anura.io` (the advertiser's fraud-detection vendor). The
+form never renders. A stock **Google Chrome** install loads the identical page
+without trouble, headless included.
 
 Verified by isolation:
 
-| Condition | Result |
-|-----------|--------|
-| Headless, `anura.io` reachable | renderer crash, form never renders |
-| Headless, `anura.io` blocked at the network layer | loads normally, step 0 renders |
+| Browser | Mode | Result |
+|---------|------|--------|
+| Google Chrome (`channel=chrome`) | headless | ✅ form renders |
+| Google Chrome (`channel=chrome`) | headed | ✅ form renders |
+| Bundled Chromium | headless | ❌ renderer crash |
+| Bundled Chromium | headed | ❌ renderer crash |
+| Bundled Chromium, `anura.io` blocked | headless | ✅ form renders |
 
-The crash is caused by the fraud-detection script, not by the site's own code,
-the proxy configuration, or the device fingerprint.
+The last row shows the script is what *triggers* the crash — but since real
+Chrome executes that same script fine, this is a **Chromium build bug, not bot
+detection**. Nothing needs to be suppressed or worked around; just run Chrome.
 
-Anura exists specifically to identify non-human form submissions, so suppressing
-it is not a supported configuration of this tool and is deliberately not
-implemented. If you have a commercial relationship with this advertiser, the
-practical routes forward are a server-to-server posting agreement or an
-allow-listed integration — ask your affiliate manager. The filler itself is
-complete and will work as soon as the page renders.
+**Requirement:** Google Chrome must be installed on the host. The engine
+defaults to `BROWSER_CHANNEL=chrome`; Settings → Browser exposes the choice and
+a *Test Against Offer* button that loads the real page and reports whether it
+rendered or crashed. In Docker, add Chrome to the image (`playwright install
+chrome`) — the bundled Chromium alone is not sufficient for this target.
+
+If the browser crashes anyway, the lead fails with `browser_crashed` /
+`stuck` rather than hanging the engine: a crashed renderer never acknowledges
+`close()`, so teardown is left to the Playwright driver instead.
 
 ---
 
@@ -171,10 +180,11 @@ complete and will work as soon as the page renders.
 | `GOOGLE_SHEET_URL` | — | Sheet URL or ID |
 | `GOOGLE_SHEET_WORKSHEET` | `Sheet1` | Tab name |
 | `SHEET_URL_AEF` / `SHEET_WS_AEF` | — | Per-offer override; blank falls back to the two above |
+| `BROWSER_CHANNEL` | `chrome` | `chrome` \| `chromium` \| `msedge`. Bundled `chromium` crashes on this target |
 | `PROXY_SOURCE` | `file` | `file`, `env`, `rotating`, or `none` |
 | `PROXY_LIST` | — | Comma-separated proxies (source=env) |
 | `ROTATING_PROXY_URL` | — | Single rotating endpoint |
-| `HEADLESS` | `true` | The web UI always forces this to `true` |
+| `HEADLESS` | `true` | Set from Settings → Browser; headed needs a display |
 | `LOG_LEVEL` | `INFO` | DEBUG / INFO / WARNING / ERROR |
 
 ### `config.yaml`

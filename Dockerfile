@@ -20,8 +20,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python deps first (layer cached separately from app code)
 COPY requirements.txt .
+# Chrome as well as Chromium: the bundled Chromium build crashes its renderer on
+# the target offer's fraud-detection script, while stock Chrome loads it fine.
+# core/form_filler_aef.py launches BROWSER_CHANNEL=chrome by default.
 RUN pip install --no-cache-dir -r requirements.txt \
- && playwright install chromium --with-deps
+ && playwright install chromium --with-deps \
+ && playwright install chrome --with-deps
 
 # Copy application code (credentials/, .env, logs/, screenshots/ are
 # excluded by .dockerignore and volume-mounted at runtime)
