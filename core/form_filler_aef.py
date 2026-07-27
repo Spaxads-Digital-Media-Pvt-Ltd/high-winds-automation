@@ -521,24 +521,51 @@ class FormFiller:
             return ""
 
     def _select(self, page: Page, name: str, value: str) -> bool:
+        """Choose an <option> by value, falling back to its visible label.
+
+        select_option() takes plain strings only — passing a compiled regex
+        raises "'re.Pattern' object is not iterable" — so label matching is done
+        in the page instead, where we can be lenient about case and whitespace.
+        """
         if not value:
             return False
+        loc = page.locator(f'{_FORM} select[name="{name}"]').first
+        for kwargs in ({"value": value}, {"label": value}):
+            try:
+                loc.select_option(timeout=6000, **kwargs)
+                return True
+            except Exception:
+                pass
         try:
-            page.locator(f'{_FORM} select[name="{name}"]').first.select_option(
-                value=value, timeout=8000
+            matched = page.evaluate(
+                """([n, v]) => {
+                    const sel = document.querySelector('#applicantForm select[name="' + n + '"]');
+                    if (!sel) return null;
+                    const want = String(v).trim().toLowerCase();
+                    const opts = Array.from(sel.options);
+                    const hit =
+                        opts.find(o => o.value.trim().toLowerCase() === want) ||
+                        opts.find(o => o.text.trim().toLowerCase() === want) ||
+                        opts.find(o => o.text.trim().toLowerCase().includes(want) && want.length > 1);
+                    if (!hit) return null;
+                    sel.value = hit.value;
+                    sel.dispatchEvent(new Event('input',  { bubbles: true }));
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    return hit.value;
+                }""",
+                [name, value],
             )
-            return True
-        except Exception:
-            pass
-        # Fall back to matching on the visible option text.
-        try:
-            page.locator(f'{_FORM} select[name="{name}"]').first.select_option(
-                label=re.compile(re.escape(value), re.I), timeout=4000
+            if matched is not None:
+                return True
+            available = page.evaluate(
+                """(n) => { const s = document.querySelector('#applicantForm select[name="' + n + '"]');
+                            return s ? Array.from(s.options).map(o => o.value).slice(0, 20) : []; }""",
+                name,
             )
-            return True
+            log.warning("form.select_no_option", field=name, wanted=value, available=available)
         except Exception as e:
             log.warning("form.select_failed", field=name, value=value, error=str(e)[:80])
-            return False
+        return False
 
     def _radio(self, page: Page, name: str, value: str) -> bool:
         """Bootstrap hides the radio itself and styles its <label>; click the

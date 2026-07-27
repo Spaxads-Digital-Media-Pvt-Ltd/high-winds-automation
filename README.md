@@ -160,6 +160,34 @@ If the browser crashes anyway, the lead fails with `browser_crashed` /
 
 ---
 
+## 🧪 Testing Without Submitting Real Applications
+
+Rows land in the sheet as **Pending**, so pressing Start submits them as real
+loan applications. To exercise the pipeline without that, run the bundled mock:
+
+```bash
+python devtools/serve_mock.py
+# then: Settings → Target URLs → http://127.0.0.1:8799/index.html → Start
+```
+
+`devtools/mock_offer/` reproduces the live site's DOM contract — same field
+names, same option values, same required-field semantics as its `validateStep()`
+— and finishes on a `cmd=RenderResult` URL, so the filler treats it as a
+delivered lead. Everything else is real: sheet read, engine, retries, live
+preview, status write-back.
+
+The sheet ships with five synthetic sample rows covering different mapping
+branches (income and debt brackets, credit bands, pay frequencies, account
+types, homeowner/military flags). Their SSNs are in the 900-999 range the SSA
+never issues, phone numbers use the 555-01xx block reserved for fiction, and
+emails are `@example.com`. **They are for the mock only — do not point them at
+the live site.**
+
+Verified run against the mock: 5/5 Success, ~72 s per lead, statuses and
+submission IDs written back to the sheet.
+
+---
+
 ## 🛡️ Anti-Detection Features
 
 - Stealth JS injection — hides `navigator.webdriver`, spoofs WebGL / canvas / plugins

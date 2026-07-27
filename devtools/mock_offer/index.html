@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>AEF mock</title></head>
+<body>
+<div id="splashScreen">splash</div>
+<form id="applicantForm" style="display:none" autocomplete="off"></form>
+<div id="form-navigation">
+  <button type="button" id="backBtn" disabled>Back</button>
+  <button type="button" id="nextBtn">Continue</button>
+</div>
+<div id="tcpaWrap">
+  <button type="button" id="tcpa_acceptButton">Accept</button>
+  <button type="button" id="tcpa_continueButton" disabled>Continue</button>
+</div>
+<script>
+// Mirrors the real funnel: one step at a time inside #applicantForm, advanced
+// by #nextBtn, with the same field names / option values as fields.js.
+const steps = [
+  {f:['loanreqamt'], html:`
+     <input type="text" inputmode="numeric" id="customLoanAmount" name="customLoanAmount" placeholder="$5,000">
+     <input type="radio" name="loanreqamt" id="loanreqamt-0" value="1000"><label for="loanreqamt-0">up to $1,000</label>
+     <input type="radio" name="loanreqamt" id="loanreqamt-1" value="3000"><label for="loanreqamt-1">up to $3,000</label>
+     <input type="radio" name="loanreqamt" id="loanreqamt-2" value="5000"><label for="loanreqamt-2">above + $3,000</label>`},
+  {f:['fname','lname','dob'], html:`
+     <input type="text" name="fname" id="fname" placeholder="First name">
+     <input type="text" name="lname" id="lname" placeholder="Last name">
+     <input type="text" name="dob" id="dob" inputmode="numeric" placeholder="01/01/1970">`},
+  {f:['email','lastfourssn'], html:`
+     <input type="email" name="email" id="email">
+     <input type="text" name="lastfourssn" id="lastfourssn" maxlength="4">`},
+  {f:['phhm'], html:`<input type="text" name="phhm" id="phhm" inputmode="numeric">`},
+  {f:['hpostal','haddress1','hcity','hstate'], html:`
+     <input type="text" name="hpostal" id="hpostal" maxlength="5">
+     <input type="text" name="haddress1" id="haddress1">
+     <input type="text" name="hcity" id="hcity">
+     <select name="hstate" id="hstate"><option value="">Select a state</option><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY">NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select>`},
+  {f:['i_ad_ccDebtAmt'], html:`
+     <select name="i_ad_ccDebtAmt"><option value="">Choose debt amount</option><option value="0">0</option><option value="4999">4999</option><option value="9999">9999</option><option value="14999">14999</option><option value="19999">19999</option><option value="24999">24999</option><option value="29999">29999</option><option value="34999">34999</option><option value="39999">39999</option><option value="44999">44999</option><option value="49999">49999</option><option value="50000">50000</option></select>`},
+  {f:['hmonthsat'], html:`
+     <input type="radio" name="hmonthsat" id="hmonthsat-60" value="60"><label for="hmonthsat-60">5 years or more</label>
+     <input type="radio" name="hmonthsat" id="hmonthsat-48" value="48"><label for="hmonthsat-48">4 years</label>
+     <input type="radio" name="hmonthsat" id="hmonthsat-36" value="36"><label for="hmonthsat-36">3 years</label>
+     <input type="radio" name="hmonthsat" id="hmonthsat-24" value="24"><label for="hmonthsat-24">2 years</label>
+     <input type="radio" name="hmonthsat" id="hmonthsat-12" value="12"><label for="hmonthsat-12">1 year or less</label>`},
+  {f:['ishowner'], html:`
+     <input type="radio" name="ishowner" id="ishowner-1" value="1"><label for="ishowner-1">Yes</label>
+     <input type="radio" name="ishowner" id="ishowner-2" value="0"><label for="ishowner-2">No</label>`},
+  {f:['netim'], html:`
+     <select name="netim"><option value="">Select one</option>
+       <option value="11000">$10,000 or More</option><option value="10000">$9,000 - $10,000</option>
+       <option value="9000">$8,000 - $9,000</option><option value="8000">$7,000 - $8,000</option>
+       <option value="7000">$6,000 - $7,000</option><option value="6000">$5,000 - $6,000</option>
+       <option value="5000">$4,000 - $5,000</option><option value="4000">$3,000 - $4,000</option>
+       <option value="3000">$2,500 - $3,000</option><option value="2500">$2,000 - $2,500</option>
+       <option value="2000">$1,500 - $2,000</option><option value="1500">Below $1500</option></select>`},
+  {f:['priincsrc'], html:`
+     <input type="radio" name="priincsrc" id="priincsrc-0" value="1"><label for="priincsrc-0">Employed</label>
+     <input type="radio" name="priincsrc" id="priincsrc-1" value="2"><label for="priincsrc-1">Benefits</label>`},
+  {f:['payfreq'], html:`
+     <input type="radio" name="payfreq" id="payfreq-0" value="1"><label for="payfreq-0">Weekly</label>
+     <input type="radio" name="payfreq" id="payfreq-1" value="2"><label for="payfreq-1">Bi-Weekly</label>
+     <input type="radio" name="payfreq" id="payfreq-2" value="3"><label for="payfreq-2">Monthly</label>
+     <input type="radio" name="payfreq" id="payfreq-3" value="4"><label for="payfreq-3">Semi-Monthly</label>`},
+  {f:['isactmil'], html:`
+     <input type="radio" name="isactmil" id="isactmil-0" value="1"><label for="isactmil-0">Yes</label>
+     <input type="radio" name="isactmil" id="isactmil-1" value="0"><label for="isactmil-1">No</label>`},
+  {f:['ename'], html:`<input type="text" name="ename" id="ename">`},
+  {f:['emonthsat'], html:`
+     <input type="radio" name="emonthsat" id="emonthsat-60" value="60"><label for="emonthsat-60">5 years or more</label>
+     <input type="radio" name="emonthsat" id="emonthsat-48" value="48"><label for="emonthsat-48">4 years</label>
+     <input type="radio" name="emonthsat" id="emonthsat-36" value="36"><label for="emonthsat-36">3 years</label>
+     <input type="radio" name="emonthsat" id="emonthsat-24" value="24"><label for="emonthsat-24">2 years</label>
+     <input type="radio" name="emonthsat" id="emonthsat-12" value="12"><label for="emonthsat-12">1 year or less</label>`},
+  {f:['phwrk'], html:`<input type="text" name="phwrk" id="phwrk" inputmode="numeric">`},
+  {f:['licn','licst'], html:`
+     <input type="text" name="licn" id="licn">
+     <select name="licst" id="licst"><option value="">Select a state</option><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY">NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select>`},
+  {f:['ssn'], html:`<input name="ssn" id="ssn" inputmode="numeric">`},
+  {f:['bacctype'], html:`
+     <input type="radio" name="bacctype" id="bacctype-0" value="1"><label for="bacctype-0">Checking</label>
+     <input type="radio" name="bacctype" id="bacctype-1" value="2"><label for="bacctype-1">Savings</label>`},
+  {f:['bmonthsat'], html:`
+     <input type="radio" name="bmonthsat" id="bmonthsat-60" value="60"><label for="bmonthsat-60">5 years or more</label>
+     <input type="radio" name="bmonthsat" id="bmonthsat-48" value="48"><label for="bmonthsat-48">4 years</label>
+     <input type="radio" name="bmonthsat" id="bmonthsat-36" value="36"><label for="bmonthsat-36">3 years</label>
+     <input type="radio" name="bmonthsat" id="bmonthsat-24" value="24"><label for="bmonthsat-24">2 years</label>
+     <input type="radio" name="bmonthsat" id="bmonthsat-12" value="12"><label for="bmonthsat-12">1 year or less</label>`},
+  {f:['isdd'], html:`
+     <input type="radio" name="isdd" id="isdd-0" value="1"><label for="isdd-0">Yes</label>
+     <input type="radio" name="isdd" id="isdd-1" value="0"><label for="isdd-1">No</label>`},
+  {f:['crscore'], html:`
+     <input type="radio" name="crscore" id="crscore-0" value="2"><label for="crscore-0">Great 700+</label>
+     <input type="radio" name="crscore" id="crscore-1" value="3"><label for="crscore-1">600 - 700</label>
+     <input type="radio" name="crscore" id="crscore-2" value="4"><label for="crscore-2">500 - 600</label>
+     <input type="radio" name="crscore" id="crscore-3" value="5"><label for="crscore-3"></label>
+     <input type="radio" name="crscore" id="crscore-4" value="1"><label for="crscore-4">Not Sure</label>`},
+  {f:['loanreason'], html:`
+     <input type="radio" name="loanreason" id="reason1" value="14"><label for="reason1">Credit card debt relief</label>
+     <input type="radio" name="loanreason" id="reason2" value="1"><label for="reason2">Debt consolidation</label>
+     <input type="radio" name="loanreason" id="reason3" value="13"><label for="reason3">Other reasons</label>`},
+  {f:['baba','bacc'], html:`
+     <input type="text" name="baba" id="baba" inputmode="numeric" maxlength="9">
+     <input type="text" name="bacc" id="bacc" inputmode="numeric" minlength="4" maxlength="17">`},
+];
+
+let cur = -1, captured = {};
+const form = document.getElementById('applicantForm');
+const nextBtn = document.getElementById('nextBtn');
+
+document.getElementById('tcpa_acceptButton').addEventListener('click', () => {
+  document.getElementById('tcpaWrap').style.display = 'none';
+  document.getElementById('splashScreen').style.display = 'none';
+  form.style.display = 'block';
+  render(0);
+});
+
+function capture() {
+  form.querySelectorAll('input,select').forEach(el => {
+    if (el.type === 'radio') { if (el.checked) captured[el.name] = el.value; }
+    else if (el.value) captured[el.name] = el.value;
+  });
+}
+function render(i) {
+  cur = i;
+  form.innerHTML = steps[i].html;
+  nextBtn.innerText = (i === steps.length - 1) ? 'Request Loan' : 'Continue';
+  nextBtn.dataset.submit = (i === steps.length - 1) ? 'true' : 'false';
+}
+nextBtn.addEventListener('click', () => {
+  capture();
+  // Mirror funnel.js validateStep(): a non-empty customLoanAmount satisfies
+  // loanreqamt on its own (it sets loanreqamt and unchecks the radios).
+  const custom = form.querySelector('#customLoanAmount');
+  if (custom && custom.value.trim() !== '') {
+    const v = custom.value.replace(/,/g, '');
+    if (isNaN(v) || v < 100 || v > 35000) { window.__mockError = 'bad loan amount'; return; }
+    captured['loanreqamt'] = v;
+  }
+  // Mirror the real required-semantics: radio groups must have a selection;
+  // text/select inputs only block when they carry a `required` attribute
+  // (funnel.js falls through to the generic hasAttribute('required') branch).
+  const need = steps[cur].f.filter(n => {
+    if (n === 'customLoanAmount') return false;
+    const el = form.querySelector('[name="' + n + '"]');
+    if (!el) return false;
+    if (el.type === 'radio') return true;
+    return el.hasAttribute('required');
+  });
+  const missing = need.filter(n => !(n in captured));
+  if (missing.length) { window.__mockError = 'missing ' + missing.join(','); return; }
+  if (cur === steps.length - 1) {
+    sessionStorage.setItem('captured', JSON.stringify(captured));
+    location.href = 'result.html?cmd=RenderResult&uuid=MOCK123';
+    return;
+  }
+  render(cur + 1);
+});
+</script>
+</body></html>
