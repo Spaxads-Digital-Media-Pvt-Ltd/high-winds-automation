@@ -160,7 +160,7 @@ def main() -> None:
         console.print("[yellow]⚠ No proxies loaded — running direct[/]")
 
     # ── Process each row ─────────────────────────────────────────
-    stats = {"success": 0, "failed": 0, "retry": 0, "duplicate": 0}
+    stats = {"success": 0, "failed": 0, "retry": 0}
 
     for row in tqdm(pending, desc="Processing rows", unit="row"):
         if _stop_flag[0]:
@@ -217,20 +217,6 @@ def main() -> None:
                 console.print(f"  [green]✓ Row {row_num} — Success[/]")
 
             except FormFillerError as e:
-                if e.error_type == "duplicate":
-                    sheet.update_row(
-                        row_num,
-                        status="Duplicate",
-                        notes=f"[duplicate] {e}",
-                        proxy_used=proxy_display,
-                        ip=proxy_ip,
-                        retry_count=retry_count + attempt,
-                    )
-                    stats["duplicate"] += 1
-                    success = True
-                    console.print(f"  [yellow]⚠ Row {row_num} — Duplicate[/]")
-                    break
-
                 if e.error_type == "missing_data":
                     sheet.update_row(
                         row_num,
@@ -300,7 +286,6 @@ def main() -> None:
     table.add_column("Metric", style="cyan")
     table.add_column("Count", justify="right", style="bold")
     table.add_row("✅ Success", str(stats["success"]))
-    table.add_row("🟨 Duplicate", str(stats["duplicate"]))
     table.add_row("❌ Failed", str(stats["failed"]))
     table.add_row("🔄 Retried (intermediate)", str(stats["retry"]))
     table.add_row("📋 Total Processed", str(len(pending)))

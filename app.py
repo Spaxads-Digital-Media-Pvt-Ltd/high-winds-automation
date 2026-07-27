@@ -260,7 +260,7 @@ def _mk_engine() -> dict:
         "run_opts":   {},                  # {max_leads, batch_size, batch_interval}
         "batch":      {"waiting": False, "next_in": 0, "batch_num": 0},
         "log_queue":  queue.Queue(maxsize=1000),
-        "stats":      {"success": 0, "failed": 0, "duplicate": 0, "total": 0, "processed": 0},
+        "stats":      {"success": 0, "failed": 0, "total": 0, "processed": 0},
     }
 
 _engines: dict[str, dict] = {oid: _mk_engine() for oid in OFFERS}
@@ -279,7 +279,7 @@ def _ss_path(offer_id: str) -> Path:
 def _cleanup_row_screenshots(offer_id: str, row_num: int) -> None:
     """Delete a lead's per-row screenshots once it has been processed.
 
-    Per-row captures (row_NNNN_success/error/stuck/duplicate, offers_page,
+    Per-row captures (row_NNNN_success/error/stuck, offers_page,
     credit_tab, debug steps) are only needed transiently and otherwise pile up
     indefinitely. The rolling live-preview file (live_view.png) is kept so the
     browser preview keeps working."""
@@ -361,7 +361,7 @@ def _run_engine(offer_id: str, target_url: str) -> None:
     stop_event = eng["stop_event"]
     skip_wait  = eng["skip_wait"]
     eng["running"] = True
-    eng["stats"] = {"success": 0, "failed": 0, "duplicate": 0, "total": 0, "processed": 0}
+    eng["stats"] = {"success": 0, "failed": 0, "total": 0, "processed": 0}
     eng["batch"] = {"waiting": False, "next_in": 0, "batch_num": 0}
     run_opts       = eng.get("run_opts") or {}
     max_leads      = run_opts.get("max_leads")
@@ -527,17 +527,6 @@ def _run_engine(offer_id: str, target_url: str) -> None:
                         success = True
                         break
 
-                    if e.error_type == "duplicate":
-                        sheet.update_row(row_num, status="Duplicate",
-                                         notes=f"[duplicate] {e}",
-                                         proxy_used=proxy_display, ip=proxy_ip,
-                                         retry_count=retry_count + attempt)
-                        eng["stats"]["duplicate"] += 1
-                        eng["stats"]["processed"] += 1
-                        success = True
-                        _log(offer_id, f"WARN  Row {row_num} -> Duplicate")
-                        break
-
                     if e.error_type == "missing_data":
                         sheet.update_row(row_num, status="Failed",
                                          notes=f"[missing_data] {e}",
@@ -616,7 +605,7 @@ def _run_engine(offer_id: str, target_url: str) -> None:
         s = eng["stats"]
         _log(offer_id,
              f"DONE  Run complete -- Success: {s['success']}  "
-             f"Duplicate: {s['duplicate']}  Failed: {s['failed']}  "
+             f"Failed: {s['failed']}  "
              f"Processed: {s['processed']}/{s['total']}")
 
     except Exception as e:
@@ -822,7 +811,6 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
   text-transform: uppercase; letter-spacing: .5px;
 }
 .sv-ok   .stat-val { color: #4ade80; }
-.sv-dup  .stat-val { color: #facc15; }
 .sv-fail .stat-val { color: #f87171; }
 .sv-tot  .stat-val { color: #7dd3fc; }
 .ss-wrap {
@@ -1066,10 +1054,6 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
           <div class="stat sv-ok">
             <div class="stat-val" id="s-ok-{{ key }}">0</div>
             <div class="stat-lbl">OK</div>
-          </div>
-          <div class="stat sv-dup">
-            <div class="stat-val" id="s-dup-{{ key }}">0</div>
-            <div class="stat-lbl">Dup</div>
           </div>
           <div class="stat sv-fail">
             <div class="stat-val" id="s-fail-{{ key }}">0</div>
@@ -1346,7 +1330,6 @@ function setRunning(key, running) {
 
 function updStats(key, s) {
   document.getElementById('s-ok-'   + key).textContent = s.success;
-  document.getElementById('s-dup-'  + key).textContent = s.duplicate;
   document.getElementById('s-fail-' + key).textContent = s.failed;
   document.getElementById('s-proc-' + key).textContent = s.processed;
   document.getElementById('s-tot-'  + key).textContent = s.total;

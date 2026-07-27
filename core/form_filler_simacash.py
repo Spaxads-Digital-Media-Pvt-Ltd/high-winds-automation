@@ -265,8 +265,6 @@ class FormFiller:
                     pass
                 last_shot = now
 
-            self._raise_on_duplicate(page, row_number)
-
             if self._is_complete(page):
                 log.info("form.submitted", row=row_number, url=(page.url or "")[:60])
                 return
@@ -893,22 +891,6 @@ class FormFiller:
         log.warning("form.final_submit_no_button")
         return False
 
-    def _raise_on_duplicate(self, page: Page, row_number: int) -> None:
-        try:
-            body = (page.evaluate("document.body ? document.body.innerText : ''") or "").lower()
-        except Exception:
-            return
-        phrases = (
-            "already applied", "already submitted", "already have an application",
-            "already exists", "application already", "duplicate application",
-        )
-        if any(p in body for p in phrases):
-            self._screenshot(page, row_number, "duplicate")
-            raise FormFillerError(
-                "Duplicate: applicant already submitted on simacash",
-                error_type="duplicate",
-            )
-
     # ------------------------------------------------------------ entry page
 
     def _resolve_entry_url(self, url: str) -> str:
@@ -1295,8 +1277,6 @@ class FormFiller:
 
     def _classify_error(self, exc: Exception) -> str:
         msg = str(exc).lower()
-        if "duplicate" in msg or "already" in msg:
-            return "duplicate"
         if "proxy" in msg or "net::err" in msg or "tunnel" in msg:
             return "proxy_error"
         if "timeout" in msg:

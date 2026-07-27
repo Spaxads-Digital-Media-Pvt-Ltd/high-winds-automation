@@ -225,7 +225,6 @@ class FormFiller:
             debug_dir.mkdir(parents=True, exist_ok=True)
 
         seen_titles: dict[str, int] = {}
-        greeting_seen = 0  # times the bare first-name greeting recurred (dup signal)
         for step_num in range(0, 60):
             for _ in range(5):
                 if stop_event and stop_event.is_set():
@@ -290,68 +289,26 @@ class FormFiller:
                     )
                 continue
 
-            # ── Duplicate detection ─────────────────────────────────────────
-            # Signal 1: "welcome back" greeting — form recognised the email as
-            # an existing applicant.
+            # ── Returning applicant ("welcome back") ─────────────────────────
+            # Duplicate skipping has been removed: every lead is filled and
+            # submitted regardless of whether the site recognises it. When a
+            # returning applicant is greeted with "welcome back" the site
+            # condenses the flow to the final steps — click through the greeting
+            # and let the loop fill the remaining steps and submit.
             if "welcome back" in title:
-                self._screenshot(page, row_number, "duplicate_welcome_back")
-                log.warning(
-                    "form.duplicate_detected",
-                    reason="welcome_back",
+                log.info(
+                    "form.welcome_back",
                     step=step_num,
                     title=title[:80],
                     row=row_number,
                 )
-                raise FormFillerError(
-                    f"Duplicate: form greeted with 'welcome back' at step {step_num}",
-                    error_type="duplicate",
-                )
-
-            # Signal 2: form jumped straight to the 93% submit/request-cash
-            # step after only a few early steps — means the lead was already
-            # submitted and the site skipped the full flow.
-            _is_submit_step = (
-                "submit" in title or "loan request" in title or "request cash" in title
-            )
-            if _is_submit_step and step_num < 10:
-                self._screenshot(page, row_number, "duplicate_auto_jump")
-                log.warning(
-                    "form.duplicate_detected",
-                    reason="auto_jump_to_submit",
-                    step=step_num,
-                    title=title[:80],
-                    row=row_number,
-                )
-                raise FormFillerError(
-                    f"Duplicate: form auto-jumped to submit step at step {step_num}",
-                    error_type="duplicate",
-                )
-            # Signal 3: bare first-name greeting (e.g. "Christophe!"). The nova
-            # flow only shows this screen when it keeps re-greeting a returning /
-            # already-submitted applicant — it loops with "verifying your
-            # information..." and never reaches a real question (a fresh lead
-            # never sees it). If the greeting recurs, mark the lead a duplicate —
-            # a clean terminal state — instead of burning retries on a generic
-            # "stuck". Loop-based, so a one-off legitimate interstitial still
-            # clicks through normally.
-            _first = (f.get("first_name") or "").strip().lower()
-            if _first and title.rstrip("! ").strip() == _first:
-                greeting_seen += 1
-                if greeting_seen >= 3:
-                    self._screenshot(page, row_number, "duplicate_greeting_loop")
-                    log.warning(
-                        "form.duplicate_detected",
-                        reason="greeting_loop",
-                        step=step_num,
-                        title=title[:80],
-                        row=row_number,
-                    )
-                    raise FormFillerError(
-                        f"Duplicate: form looped on greeting {title!r} "
-                        f"(returning applicant) at step {step_num}",
-                        error_type="duplicate",
-                    )
-            # ── End duplicate detection ─────────────────────────────────────
+                try:
+                    page.screenshot(path=str(self._ss_dir / "live_view.png"))
+                except Exception:
+                    pass
+                self._continue(frame)
+                time.sleep(2)
+                continue
 
             log.info("form.step", step=step_num, title=title[:60], row=row_number)
 
@@ -2296,8 +2253,6 @@ class FormFiller:
 
     def _classify_error(self, exc: Exception) -> str:
         msg = str(exc).lower()
-        if "duplicate" in msg or "already" in msg or "exist" in msg:
-            return "duplicate"
         if "proxy" in msg or "net::err" in msg or "tunnel" in msg:
             return "proxy_error"
         if "timeout" in msg:
