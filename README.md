@@ -141,11 +141,29 @@ outcome written to the sheet's `Notes` column.
 
 ## ⚠️ Validating the MyLendingWallet filler
 
-**The MLW filler is not yet verified end-to-end.** What is confirmed against the
-live page: the 31-field vocabulary and backend endpoints are identical to AEF
-(read from the site's own JS bundle), the form renders under Chrome, field
-detection works despite the per-render form id, `loanreqamt` fills and reads
-back correctly, and the step-0 advance button is "Start Request Now".
+**Verified against the live form** by walking every step (stopping before the
+final submit — no application was completed). All steps now fill and advance:
+loan amount · name/DOB · email/SSN-4 · phone · address+state · debt · homeowner ·
+income · pay frequency · military · employer · employment length · work phone ·
+driver's licence + state · SSN · account type.
+
+Two bugs were found and fixed this way, both of which had been failing in
+production:
+
+* **Choice steps rejected every value.** The filler matched options by their
+  visible label using AEF's wording, but this site words them differently
+  ("5+ years" not "5 years or more", "Under 1 year" not "1 year or less",
+  "self-employed" hyphenated). It turns out these are real
+  `<input type=radio name=X value=Y>` groups carrying the platform's own
+  values — the same values as AEF — so they are now set **by value** and the
+  wording is irrelevant.
+* **State dropdowns never took, and one failed silently.** `hstate` and `licst`
+  are HeroUI `<Select>` components: the element holding the `name` is a
+  visually-hidden a11y mirror, and writing it leaves React's state untouched.
+  `licst` surfaced as "stuck at licn,licst"; `hstate` failed *quietly* because
+  the address step advanced on its text fields alone — meaning **leads
+  submitted before this fix had an empty home state**. Both now drive the real
+  listbox.
 
 Also confirmed, against the `mlw/` mock: the filler drives all 23 steps and
 sets all 31 fields correctly, including choice-only steps that expose no named

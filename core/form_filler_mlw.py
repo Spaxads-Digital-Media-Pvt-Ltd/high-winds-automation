@@ -9,31 +9,35 @@ rather than AEF's server-rendered Bootstrap wizard.  All value mapping is
 therefore inherited unchanged from BasePlatformFiller; only the DOM layer here
 differs.
 
-DOM differences from AEF, confirmed against the live page:
+DOM contract, captured by walking the live form (devtools/mlw_steps.json):
 
-  * The <form> id is generated per render (e.g. ``tf---fcg23sw``) and cannot be
-    used as an anchor.  We scope to the form element that actually contains
-    platform-named fields instead.
-  * Choices are <button> elements carrying the option's visible label — there
-    are no <input type=radio> value attributes to target.  Selection is
-    therefore by label text, using the platform's shared label vocabulary
-    (verified identical to AEF at step 0: "up to $1,000" / "up to $3,000" /
-    "above + $3,000").
-  * Inputs do carry platform ``name`` attributes (``loanreqamt`` confirmed), so
-    the field-driven dispatch inherited from the AEF work applies directly.
-  * react-hook-form ignores a plain value assignment: setting a field requires
-    real typing, or a native-setter write followed by input/change/blur, which
-    is what ``_text`` below does.
+  * The <form> id is regenerated per render (e.g. ``tf---fcg23sw``), so it
+    cannot be an anchor.  Scope instead to whichever element carries a
+    platform-named field.
+  * Every choice except step 0 is a real ``<input type=radio name=X value=Y>``
+    group or a native ``<select>``, both carrying the platform's own value —
+    identical values to AEF (tenure 60/48/36/24/12, yes/no 1/0, payfreq 1-4,
+    …).  Selection is therefore **by value**, and the visible wording does not
+    matter.  Only step 0's loan amount is button chips with no value attribute,
+    which is the single case that needs label matching.
+  * The radios carry no ``id``, so ``label[for=…]`` finds nothing; the click
+    target is the input's wrapping <label>.
+  * react-hook-form ignores a plain value assignment: setting a text field
+    requires real typing, or a native-setter write followed by
+    input/change/blur, which is what ``_text`` does.
 
-Step content is fetched from the server at runtime — it is not in the JS bundle
-— so the step sequence is discovered live, exactly as on AEF.
+Step order observed live: loanreqamt · fname/lname/dob · email/lastfourssn ·
+phhm · haddress1/hpostal/hcity/hstate · i_ad_ccDebtAmt · hmonthsat · ishowner ·
+netim · priincsrc · payfreq · isactmil · ename · emonthsat · phwrk ·
+licn/licst · … · baba/bacc.  As on AEF the server decides which steps render,
+so dispatch stays field-driven rather than index-driven.
 
-⚠️  UNVERIFIED: the DOM contract above is confirmed for step 0 only.  Walking
-further requires submitting data to the live advertiser, which has not been
-done.  Label vocabulary for later steps is inferred from AEF (same platform,
-and step 0's labels match exactly).  Selectors are written defensively and log
-what they actually see, but this filler has NOT been validated end-to-end
-against the real form.  See README → "Validating the MyLendingWallet filler".
+An earlier version of this filler matched choices by label using AEF's
+vocabulary.  That was wrong: this site words the same options differently
+("5+ years" not "5 years or more", "Under 1 year" not "1 year or less",
+"self-employed" hyphenated), which failed every tenure and income-source step.
+Value matching removes the guesswork; the label table survives only as the
+step-0 fallback and now holds this site's actual wording.
 """
 from __future__ import annotations
 
@@ -50,28 +54,34 @@ log = structlog.get_logger(__name__)
 
 __all__ = ["FormFiller", "FormFillerError"]
 
-# Option label vocabulary, shared with AEF (same platform copy).  Selection is
-# by label because this front-end renders choices as <button>, not <input>.
+# Label fallback, used only when a field is rendered as button chips with no
+# value attribute to target — which on this site is step 0's loan amount alone.
+# Everything else is a real radio group or <select> carrying the platform value,
+# so it is set by value and never needs these.
+#
+# Labels below are the ones this site actually renders (captured from the live
+# form), NOT AEF's.  They differ in places that matter: "5+ years" vs AEF's
+# "5 years or more", "Under 1 year" vs "1 year or less", and "self-employed"
+# with a hyphen.  Matching on AEF's wording is what broke the tenure steps.
 _CHOICE_LABELS: dict[str, dict[str, list[str]]] = {
     "loanreqamt": {"1000": ["up to $1,000"], "3000": ["up to $3,000"],
                    "5000": ["above + $3,000", "above $3,000"]},
-    "hmonthsat":  {"60": ["5 years or more"], "48": ["4 years"], "36": ["3 years"],
-                   "24": ["2 years"], "12": ["1 year or less"]},
-    "emonthsat":  {"60": ["5 years or more"], "48": ["4 years"], "36": ["3 years"],
-                   "24": ["2 years"], "12": ["1 year or less"]},
-    "bmonthsat":  {"60": ["5 years or more"], "48": ["4 years"], "36": ["3 years"],
-                   "24": ["2 years"], "12": ["1 year or less"]},
+    "hmonthsat":  {"60": ["5+ years"], "48": ["4 years"], "36": ["3 years"],
+                   "24": ["2 years"], "12": ["Under 1 year"]},
+    "emonthsat":  {"60": ["5+ years"], "48": ["4 years"], "36": ["3 years"],
+                   "24": ["2 years"], "12": ["Under 1 year"]},
+    "bmonthsat":  {"60": ["5+ years"], "48": ["4 years"], "36": ["3 years"],
+                   "24": ["2 years"], "12": ["Under 1 year"]},
     "ishowner":   {"1": ["Yes"], "0": ["No"]},
     "isactmil":   {"1": ["Yes"], "0": ["No"]},
     "isdd":       {"1": ["Yes"], "0": ["No"]},
-    "priincsrc":  {"1": ["Employed or self employed", "Employed"],
-                   "2": ["Benefits or not employed", "Benefits"]},
-    "payfreq":    {"1": ["Weekly"], "2": ["Bi-Weekly", "Biweekly"],
-                   "3": ["Monthly"], "4": ["Semi-Monthly", "Semi Monthly"]},
+    "priincsrc":  {"1": ["Employed or self-employed"],
+                   "2": ["Benefits or not employed"]},
+    "payfreq":    {"1": ["Weekly"], "2": ["Bi-Weekly"],
+                   "3": ["Monthly"], "4": ["Semi-Monthly"]},
     "bacctype":   {"1": ["Checking"], "2": ["Savings", "Saving"]},
-    "crscore":    {"2": ["Great 700+", "Great", "700+"], "3": ["600 - 700", "600-700"],
-                   "4": ["500 - 600", "500-600"], "5": ["Below 500", "less than 500"],
-                   "1": ["Not Sure", "Not sure"]},
+    "crscore":    {"2": ["Great 700+", "700+"], "3": ["600 - 700"],
+                   "4": ["500 - 600"], "5": ["Below 500"], "1": ["Not Sure"]},
     "loanreason": {"14": ["Credit card debt relief"], "1": ["Debt consolidation"],
                    "13": ["Other reasons", "Other"]},
     "netim":      {"11000": ["$10,000 or More"], "10000": ["$9,000 - $10,000"],
@@ -79,13 +89,13 @@ _CHOICE_LABELS: dict[str, dict[str, list[str]]] = {
                    "7000": ["$6,000 - $7,000"], "6000": ["$5,000 - $6,000"],
                    "5000": ["$4,000 - $5,000"], "4000": ["$3,000 - $4,000"],
                    "3000": ["$2,500 - $3,000"], "2500": ["$2,000 - $2,500"],
-                   "2000": ["$1,500 - $2,000"], "1500": ["Below $1500", "Below $1,500"]},
-    "i_ad_ccDebtAmt": {"0": ["none", "None"], "4999": ["$1,000 - $4,999"],
+                   "2000": ["$1,500 - $2,000"], "1500": ["Below $1500"]},
+    "i_ad_ccDebtAmt": {"0": ["None"], "4999": ["$1,000 - $4,999"],
                        "9999": ["$5,000 - $9,999"], "14999": ["$10,000 - $14,999"],
                        "19999": ["$15,000 - $19,999"], "24999": ["$20,000 - $24,999"],
                        "29999": ["$25,000 - $29,999"], "34999": ["$30,000 - $34,999"],
                        "39999": ["$35,000 - $39,999"], "44999": ["$40,000 - $44,999"],
-                       "49999": ["$45,000 - $49,999"], "50000": ["$50,000 +", "$50,000+"]},
+                       "49999": ["$45,000 - $49,999"], "50000": ["$50,000+"]},
 }
 
 # Buttons that advance rather than choose.  "Start Request Now" is this site's
@@ -248,7 +258,7 @@ class FormFiller(BasePlatformFiller):
     def _handle_step(self, page: Page, names: list[str], f: dict) -> dict:
         """Fill every platform field the current step exposes."""
         def choice(field: str, value: str) -> bool:
-            return self._choose(page, field, value)
+            return self._set_option(page, field, value)
 
         handlers: dict[str, Callable[[], bool]] = {
             "loanreqamt":     lambda: self._set_loan_amount(page, f),
@@ -262,16 +272,16 @@ class FormFiller(BasePlatformFiller):
             "hpostal":        lambda: self._text(page, "hpostal", f["zip"]),
             "haddress1":      lambda: self._text(page, "haddress1", f["street_address"]),
             "hcity":          lambda: self._text(page, "hcity", f["city"]),
-            "hstate":         lambda: self._set(page, "hstate", f["state"]),
+            "hstate":         lambda: self._set_option(page, "hstate", f["state"]),
             "ename":          lambda: self._text(page, "ename", f["employer_name"]),
             "licn":           lambda: self._text(page, "licn", f["dl_number"]),
-            "licst":          lambda: self._set(page, "licst", f["dl_state"]),
+            "licst":          lambda: self._set_option(page, "licst", f["dl_state"]),
             "ssn":            lambda: self._text(page, "ssn", f["ssn"]),
             "baba":           lambda: self._text(page, "baba", f["routing_number"]),
             "bacc":           lambda: self._text(page, "bacc", f["account_number"]),
             "bname":          lambda: self._text(page, "bname", f["bank_name"]),
-            "i_ad_ccDebtAmt": lambda: self._set(page, "i_ad_ccDebtAmt", f["debt_bracket"]),
-            "netim":          lambda: self._set(page, "netim", f["income_bracket"]),
+            "i_ad_ccDebtAmt": lambda: self._set_option(page, "i_ad_ccDebtAmt", f["debt_bracket"]),
+            "netim":          lambda: self._set_option(page, "netim", f["income_bracket"]),
             "hmonthsat":      lambda: choice("hmonthsat", f["address_months"]),
             "emonthsat":      lambda: choice("emonthsat", f["employer_months"]),
             "bmonthsat":      lambda: choice("bmonthsat", f["bank_months"]),
@@ -441,47 +451,163 @@ class FormFiller(BasePlatformFiller):
         except Exception:
             return ""
 
-    def _set(self, page: Page, name: str, value: str) -> bool:
-        """A platform 'select' field: native <select> if present, else the
-        button/listbox rendering used elsewhere in this SPA."""
+    def _set_option(self, page: Page, name: str, value: str) -> bool:
+        """Set any option-style field, whichever way this step renders it.
+
+        Order matters.  Live inspection showed almost every choice on this site
+        is a real ``<input type=radio name=X value=Y>`` group or a native
+        ``<select>``, both carrying the platform's own value — so matching on
+        value is exact and label wording is irrelevant.  Only step 0's loan
+        amount is button chips with no value to target, which is the sole case
+        that falls through to label matching.
+        """
         if not value:
             return False
-        is_select = False
-        try:
-            is_select = bool(page.evaluate(
-                """(n) => { const e = document.querySelector('[name="' + n + '"]');
-                            return !!e && e.tagName === 'SELECT'; }""", name))
-        except Exception:
-            pass
-        if is_select:
-            loc = page.locator(f'select[name="{name}"]').first
-            for kwargs in ({"value": value}, {"label": value}):
-                try:
-                    loc.select_option(timeout=6000, **kwargs)
-                    return True
-                except Exception:
-                    pass
-            try:
-                if page.evaluate(
-                    """([n, v]) => {
-                        const sel = document.querySelector('select[name="' + n + '"]');
-                        if (!sel) return null;
-                        const want = String(v).trim().toLowerCase();
-                        const hit = Array.from(sel.options).find(
-                            o => o.value.trim().toLowerCase() === want ||
-                                 o.text.trim().toLowerCase() === want);
-                        if (!hit) return null;
-                        sel.value = hit.value;
-                        sel.dispatchEvent(new Event('input',  { bubbles: true }));
-                        sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        return hit.value;
-                    }""", [name, value]) is not None:
-                    return True
-            except Exception as e:
-                log.warning("form.select_failed", field=name, error=str(e)[:80])
-            return False
-        # Not a native select — fall back to label-based choosing.
+        if self._radio(page, name, value):
+            return True
+        if self._select(page, name, value):
+            return True
         return self._choose(page, name, value)
+
+    def _radio(self, page: Page, name: str, value: str) -> bool:
+        """Click a radio by its value.  These radios carry no id, so the click
+        target is the input's wrapping <label> when there is one."""
+        try:
+            return bool(page.evaluate(
+                """([n, v]) => {
+                    const el = document.querySelector(
+                        'input[type=radio][name="' + n + '"][value="' + v + '"]');
+                    if (!el) return false;
+                    const lbl = el.closest('label')
+                        || (el.id ? document.querySelector('label[for="' + el.id + '"]') : null);
+                    (lbl || el).click();
+                    if (!el.checked) {
+                        el.checked = true;
+                        el.dispatchEvent(new Event('click',  { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    return el.checked;
+                }""",
+                [name, value]))
+        except Exception as e:
+            log.warning("form.radio_failed", field=name, value=value, error=str(e)[:80])
+            return False
+
+    def _select(self, page: Page, name: str, value: str) -> bool:
+        """Set a <select>-backed field, verifying the value actually stuck.
+
+        Some of these are plain native selects.  Others are HeroUI <Select>
+        components, where the element carrying the ``name`` is a *visually
+        hidden a11y mirror* (``data-testid="hidden-select-container"``, clipped
+        to 1px) and the real control is a custom listbox that owns the React
+        state.  Writing the mirror leaves the component untouched: the field
+        reads back empty and the step refuses to advance with "… is required",
+        while select_option() reports success.  Hence the read-back check —
+        never trust the write — and the listbox fallback below.
+        """
+        try:
+            present = bool(page.evaluate(
+                """(n) => !!document.querySelector('select[name="' + n + '"]')""", name))
+        except Exception:
+            present = False
+        if not present:
+            return False
+
+        loc = page.locator(f'select[name="{name}"]').first
+        for kwargs in ({"value": value}, {"label": value}):
+            try:
+                loc.select_option(timeout=6000, **kwargs)
+                if self._read_back(page, name) == value:
+                    return True
+            except Exception:
+                pass
+
+        # Native setter + events: React ignores a plain `.value =` assignment.
+        try:
+            page.evaluate(
+                """([n, v]) => {
+                    const sel = document.querySelector('select[name="' + n + '"]');
+                    if (!sel) return;
+                    const setter = Object.getOwnPropertyDescriptor(
+                        HTMLSelectElement.prototype, 'value').set;
+                    setter.call(sel, v);
+                    sel.dispatchEvent(new Event('input',  { bubbles: true }));
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                }""", [name, value])
+            if self._read_back(page, name) == value:
+                return True
+        except Exception as e:
+            log.warning("form.select_native_failed", field=name, error=str(e)[:80])
+
+        return self._select_listbox(page, name, value)
+
+    def _select_listbox(self, page: Page, name: str, value: str) -> bool:
+        """Drive a HeroUI custom Select.
+
+        Three things make this awkward, all confirmed on the live form:
+          * The trigger only opens for a real user click — a JS ``.click()`` on
+            it does nothing.
+          * The listbox is virtualised: with 51 states only ~9 options exist in
+            the DOM at a time, so querying for the target usually finds nothing
+            and the scroll container is barely taller than its viewport.
+          * Type-ahead does not engage; typing just leaves the first option
+            focused.
+
+        What works: open the listbox, press ArrowDown until the wanted row
+        materialises, then click it.
+
+        What does not, and cost the most time proving: every way of asking
+        "which option is highlighted?" lies here.  DOM focus never moves,
+        ``aria-activedescendant`` is null, and ``data-focus="true"`` sits on a
+        recycled node — so a walk driven by any of them appears to stall on the
+        9th option while the rendered window is demonstrably still advancing.
+        Hence: don't track the highlight, just watch for the target to appear.
+        """
+        try:
+            base = page.locator(f'select[name="{name}"]').locator(
+                'xpath=ancestor::*[@data-slot="base"][1]')
+            if not base.count():
+                return False
+            trigger = base.locator(
+                'button[data-slot="trigger"], [aria-haspopup="listbox"], button').first
+            if not trigger.count():
+                log.warning("form.listbox_no_trigger", field=name)
+                return False
+            trigger.click()          # real click — JS .click() will not open it
+            page.wait_for_selector('[role="option"]', timeout=5000)
+
+            # Don't track which option is highlighted — the virtualiser recycles
+            # the option nodes, so data-focus/tabindex/activeElement all report a
+            # stale element and any walk based on them appears to stall after the
+            # first rendered window.  ArrowDown *does* advance the window, so
+            # simply step until the target row materialises, then click it.
+            budget = page.evaluate(
+                """(n) => {
+                    const s = document.querySelector('select[name="' + n + '"]');
+                    return s ? Array.from(s.options).filter(o => o.value !== '').length : 60;
+                }""", name) or 60
+            target = page.locator(f'[role="option"][data-key="{value}"]')
+            for _ in range(budget + 10):
+                if target.count():
+                    target.first.scroll_into_view_if_needed(timeout=2000)
+                    target.first.click()
+                    time.sleep(0.4)
+                    ok = self._read_back(page, name) == value
+                    log.info("form.listbox_select", field=name, value=value, ok=ok)
+                    return ok
+                page.keyboard.press("ArrowDown")
+                time.sleep(0.12)
+
+            rendered = page.evaluate(
+                """() => Array.from(document.querySelectorAll('[role="option"]'))
+                          .map(o => o.getAttribute('data-key'))""")
+            log.warning("form.listbox_option_missing", field=name, value=value,
+                        rendered=rendered)
+            page.keyboard.press("Escape")
+            return False
+        except Exception as e:
+            log.warning("form.listbox_failed", field=name, error=str(e)[:90])
+            return False
 
     def _choose(self, page: Page, field: str, value: str) -> bool:
         """Click the choice whose visible label maps to ``value``.
