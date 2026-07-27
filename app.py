@@ -36,7 +36,10 @@ load_dotenv()
 app = Flask(__name__)
 
 # ── Offers registry ───────────────────────────────────────────────────────────
-OFFERS: dict[str, dict] = {
+# Every offer the project knows about.  Set "enabled": False to take one out of
+# circulation without deleting anything — its filler, sheet tab, .env keys and
+# mock all stay in place, and flipping the flag back brings it straight back.
+ALL_OFFERS: dict[str, dict] = {
     "american_emergency_fund": {
         "name":          "American Emergency Fund",
         "url":           "https://www.americanemergencyfund.com/",
@@ -44,6 +47,7 @@ OFFERS: dict[str, dict] = {
         "color":         "#38bdf8",
         "sheet_url_env": "SHEET_URL_AEF",
         "sheet_ws_env":  "SHEET_WS_AEF",
+        "enabled":       True,
     },
     "my_lending_wallet": {
         "name":          "MyLendingWallet",
@@ -52,7 +56,17 @@ OFFERS: dict[str, dict] = {
         "color":         "#4ade80",
         "sheet_url_env": "SHEET_URL_MLW",
         "sheet_ws_env":  "SHEET_WS_MLW",
+        # Parked: the filler drives the live form correctly up to the bank step,
+        # but the final submit has never been exercised, so it is not fit to run
+        # unattended yet.  Re-enable once that last step is confirmed.
+        "enabled":       False,
     },
+}
+
+# What the UI, the engines and the scheduler actually see.  Disabled offers are
+# absent from here, so no card, route, engine or job can reference them.
+OFFERS: dict[str, dict] = {
+    oid: o for oid, o in ALL_OFFERS.items() if o.get("enabled", True)
 }
 
 # Pristine defaults — captured before any saved overrides are applied so the
@@ -2181,9 +2195,13 @@ def api_config_urls():
         if oid in OFFERS and u:
             OFFERS[oid]["url"] = u.strip()
     cfg = _load_ui_config()
-    cfg["urls"] = {oid: OFFERS[oid]["url"] for oid in OFFERS}
+    # Merge rather than replace: a disabled offer is absent from OFFERS, and
+    # rewriting the map wholesale would silently drop its saved URL.
+    saved = cfg.get("urls") or {}
+    saved.update({oid: OFFERS[oid]["url"] for oid in OFFERS})
+    cfg["urls"] = saved
     _save_ui_config(cfg)
-    return jsonify({"ok": True, "urls": cfg["urls"]})
+    return jsonify({"ok": True, "urls": {oid: OFFERS[oid]["url"] for oid in OFFERS}})
 
 
 @app.route("/api/proxy/test", methods=["POST"])

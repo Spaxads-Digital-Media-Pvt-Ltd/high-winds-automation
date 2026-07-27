@@ -5,10 +5,15 @@ fills a loan application via Playwright, and writes the result back to the sheet
 
 Two offers, both on the same lead platform:
 
-| Offer | Front-end | Sheet tab |
-|-------|-----------|-----------|
-| American Emergency Fund | server-rendered Bootstrap wizard | `Sheet1` |
-| MyLendingWallet | React SPA (react-hook-form) | `Sheet2` |
+| Offer | Front-end | Sheet tab | Status |
+|-------|-----------|-----------|--------|
+| American Emergency Fund | server-rendered Bootstrap wizard | `Sheet1` | live |
+| MyLendingWallet | React SPA (react-hook-form) | `Sheet2` | **parked** |
+
+MyLendingWallet is currently disabled in the UI — `ALL_OFFERS[...]["enabled"] =
+False` in [app.py](app.py). Its filler, sheet tab, `.env` keys and mock all
+remain in place; flipping that flag back to `True` restores the card, engine,
+routes and scheduler entry with nothing else to change.
 
 `core/lead_platform.py` holds everything the two share — the 31-field
 vocabulary, sheet parsing, value mapping and validation, and the browser
@@ -140,6 +145,9 @@ outcome written to the sheet's `Notes` column.
 ---
 
 ## ⚠️ Validating the MyLendingWallet filler
+
+> **Parked.** This offer is disabled in the UI (see above). The notes below
+> record where it got to, for whoever picks it up.
 
 **Verified against the live form** by walking every step (stopping before the
 final submit — no application was completed). All steps now fill and advance:
