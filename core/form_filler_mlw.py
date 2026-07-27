@@ -93,6 +93,27 @@ _CHOICE_LABELS: dict[str, dict[str, list[str]]] = {
 _ADVANCE_RE = (r"^(continue|next|submit|request loan|get started|start request now"
                r"|see my offer.*|finish)$")
 
+# Heading keywords that identify a choice-only step.  Several fields share an
+# identical option set — ishowner / isactmil / isdd are all just Yes/No — so the
+# visible labels alone cannot tell them apart; the question text is the only
+# discriminator.  Ordered most-specific first; first match wins.
+_HEADING_HINTS: list[tuple[str, tuple[str, ...]]] = [
+    ("isdd",           ("direct deposit", "deposited", "paycheck")),
+    ("isactmil",       ("military", "armed forces", "active duty")),
+    ("ishowner",       ("own your home", "homeowner", "own or rent", "rent")),
+    ("bmonthsat",      ("bank account", "with your bank", "banking")),
+    ("emonthsat",      ("employer", "this job", "current job", "work there")),
+    ("hmonthsat",      ("address", "residence", "live there", "lived")),
+    ("bacctype",       ("account type", "type of account", "checking or savings")),
+    ("priincsrc",      ("income source", "source of income", "primary income")),
+    ("payfreq",        ("how often", "pay frequency", "paid")),
+    ("crscore",        ("credit score", "credit rating")),
+    ("loanreason",     ("reason", "purpose", "what will you use")),
+    ("i_ad_ccDebtAmt", ("credit card debt", "debt amount", "unsecured debt")),
+    ("netim",          ("net income", "monthly income", "take home")),
+    ("loanreqamt",     ("loan amount", "how much")),
+]
+
 
 class FormFiller(BasePlatformFiller):
     """mylendingwallet.com — React SPA over the shared lead platform."""
@@ -175,6 +196,15 @@ class FormFiller(BasePlatformFiller):
             if not names and not choices:
                 time.sleep(1.5)
                 continue
+
+            # Choice-only steps expose no named input at all — the whole step is
+            # a row of labelled buttons — so the field has to be inferred from
+            # what is on screen before it can be dispatched.
+            if not names and choices:
+                inferred = self._infer_choice_field(page, choices)
+                if inferred:
+                    log.info("form.inferred_field", field=inferred, row=row_number)
+                    names = [inferred]
 
             sig = ",".join(sorted(names)) or "choices:" + ",".join(sorted(choices))[:60]
             seen[sig] = seen.get(sig, 0) + 1
@@ -287,6 +317,63 @@ class FormFiller(BasePlatformFiller):
             }""") or []
         except Exception:
             return []
+
+    def _infer_choice_field(self, page: Page, choices: list[str]) -> str | None:
+        """Work out which platform field a button-only step is asking for.
+
+        Two signals, in order:
+          1. Option-label overlap — decisive for fields with a distinctive set
+             (pay frequency, credit band, income bracket, …).
+          2. The step's heading — the only way to separate the fields whose
+             options are identical (ishowner / isactmil / isdd are all Yes/No,
+             and the three tenure questions share one set of five labels).
+        """
+        seen = {c.strip().lower() for c in choices}
+
+        scored: list[tuple[int, str]] = []
+        for field, mapping in _CHOICE_LABELS.items():
+            labels = {lbl.strip().lower() for lbls in mapping.values() for lbl in lbls}
+            overlap = len(seen & labels)
+            if overlap:
+                scored.append((overlap, field))
+        scored.sort(reverse=True)
+
+        # A single clear winner on labels alone is enough.
+        if len(scored) == 1 or (len(scored) > 1 and scored[0][0] > scored[1][0]):
+            return scored[0][1]
+
+        heading = self._heading(page).lower()
+        if heading:
+            tied = {f for _s, f in scored} or None
+            for field, keywords in _HEADING_HINTS:
+                if tied and field not in tied:
+                    continue
+                if any(k in heading for k in keywords):
+                    return field
+
+        if scored:
+            log.warning("form.ambiguous_choice_step", heading=heading[:80],
+                        candidates=[f for _s, f in scored][:5], choices=choices[:6])
+            return None
+        log.warning("form.unmapped_choice_step", heading=heading[:80], choices=choices[:8])
+        return None
+
+    def _heading(self, page: Page) -> str:
+        """Visible question text for the current step."""
+        try:
+            return page.evaluate(r"""() => {
+                const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
+                const els = Array.from(document.querySelectorAll(
+                    'h1,h2,h3,h4,legend,label,[class*=question],[class*=title],p'));
+                for (const e of els) {
+                    if (!vis(e)) continue;
+                    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+                    if (t.length > 3 && t.length < 160) return t;
+                }
+                return '';
+            }""") or ""
+        except Exception:
+            return ""
 
     def _visible_choices(self, page: Page) -> list[str]:
         """Labels of the clickable choice buttons on the current step."""

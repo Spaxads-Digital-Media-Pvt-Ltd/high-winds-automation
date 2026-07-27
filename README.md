@@ -147,7 +147,14 @@ live page: the 31-field vocabulary and backend endpoints are identical to AEF
 detection works despite the per-render form id, `loanreqamt` fills and reads
 back correctly, and the step-0 advance button is "Start Request Now".
 
-What is *inferred*, not verified: the option labels for steps 1+. They are taken
+Also confirmed, against the `mlw/` mock: the filler drives all 23 steps and
+sets all 31 fields correctly, including choice-only steps that expose no named
+input — those are identified from their option labels, falling back to the
+question heading for the fields whose options are identical (`ishowner` /
+`isactmil` / `isdd` are all Yes/No; the three tenure questions share one set).
+
+What is *inferred*, not verified: the option labels and question headings for
+steps 1+. They are taken
 from AEF's vocabulary because both sites share the platform's copy, and step 0's
 three labels match exactly — but the site fetches step content from the server
 at runtime, so it is not in the bundle and could not be read statically.
@@ -205,24 +212,36 @@ loan applications. To exercise the pipeline without that, run the bundled mock:
 
 ```bash
 python devtools/serve_mock.py
-# then: Settings → Target URLs → http://127.0.0.1:8799/index.html → Start
 ```
 
-`devtools/mock_offer/` reproduces the live site's DOM contract — same field
-names, same option values, same required-field semantics as its `validateStep()`
-— and finishes on a `cmd=RenderResult` URL, so the filler treats it as a
-delivered lead. Everything else is real: sheet read, engine, retries, live
-preview, status write-back.
+| Offer | Mock URL |
+|-------|----------|
+| American Emergency Fund | `http://127.0.0.1:8799/aef/index.html` |
+| MyLendingWallet | `http://127.0.0.1:8799/mlw/index.html` |
 
-The sheet ships with five synthetic sample rows covering different mapping
+Set **Settings → Target URLs** to the relevant one and press Start. Everything
+else is real: sheet read, engine, retries, live preview, status write-back.
+
+**The two mocks are not equally trustworthy, and the difference matters:**
+
+* `aef/` is built from the live site's own JS (`fields.js` + `funnel.js`) — same
+  field names, same option values, same `validateStep()` semantics. A pass here
+  is strong evidence the real thing will work.
+* `mlw/` is built from the live site's *observed DOM contract only* —
+  regenerated form id, `<button>` choices, platform `name` attributes. Its
+  option labels are the ones the filler assumes. A pass proves the filler's
+  mechanics; it does **not** prove the real site uses those labels.
+
+Both sheets ship with five synthetic sample rows covering different mapping
 branches (income and debt brackets, credit bands, pay frequencies, account
-types, homeowner/military flags). Their SSNs are in the 900-999 range the SSA
-never issues, phone numbers use the 555-01xx block reserved for fiction, and
-emails are `@example.com`. **They are for the mock only — do not point them at
-the live site.**
+types, homeowner/military flags). SSNs are in the 900-999 range the SSA never
+issues, phones use the 555-01xx block reserved for fiction, emails are
+`@example.com`, and routing numbers are real published bank ABAs because they
+must pass the checksum. **They are for the mocks — do not point them at a live
+site.**
 
-Verified run against the mock: 5/5 Success, ~72 s per lead, statuses and
-submission IDs written back to the sheet.
+Verified: AEF 5/5 Success against `aef/` (~72 s per lead); MLW 31/31 field
+values and all 23 steps against `mlw/`, with statuses written back to Sheet2.
 
 ---
 

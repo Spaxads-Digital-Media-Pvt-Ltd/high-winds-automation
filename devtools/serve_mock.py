@@ -1,18 +1,29 @@
 #!/usr/bin/env python3
 """
-devtools/serve_mock.py — local stand-in for the American Emergency Fund form.
+devtools/serve_mock.py — local stand-ins for both offer forms.
 
-Serves devtools/mock_offer/, which reproduces the live site's DOM contract: one
-step at a time inside #applicantForm, advanced by #nextBtn, the same field names
-and option values as template/8735/js/fields.js, and the same required-field
-semantics as its validateStep().  Completing it lands on a URL containing
-cmd=RenderResult, which is what the filler treats as a delivered lead.
+Serves devtools/mock_offer/, giving one mock per offer:
 
-Use it to exercise the whole pipeline — sheet read, engine, live preview,
-status write-back — without sending anything to the real advertiser.
+    http://127.0.0.1:8799/aef/index.html   American Emergency Fund
+    http://127.0.0.1:8799/mlw/index.html   MyLendingWallet
 
-    python devtools/serve_mock.py
-    # then in the UI: Settings -> Target URLs -> http://127.0.0.1:8799/index.html
+Point Settings -> Target URLs at the relevant one and press Start.  The whole
+pipeline runs — sheet read, engine, retries, live preview, status write-back —
+without sending anything to the real advertiser.
+
+How faithful each one is differs, and it matters:
+
+  aef/  Built from the live site's own JS (template/8735/js/fields.js +
+        funnel.js): same field names, same option values, same required-field
+        semantics as its validateStep().  A pass here is strong evidence.
+
+  mlw/  Built from the live site's OBSERVED DOM contract only — regenerated form
+        id per render, choices as <button> carrying the visible label, platform
+        `name` attributes on inputs.  Its option LABELS are the ones the filler
+        assumes (inherited from AEF's vocabulary), because mylendingwallet.com
+        fetches step content from the server at runtime rather than shipping it
+        in its bundle.  A pass here proves the filler's mechanics work; it does
+        NOT prove the real site uses these labels.  See README.
 
 Nothing is stored and nothing leaves your machine.
 """
@@ -36,10 +47,12 @@ def main() -> None:
                                 directory=str(ROOT))
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("127.0.0.1", args.port), handler) as httpd:
-        url = f"http://127.0.0.1:{args.port}/index.html"
-        print(f"\n  Mock offer form running at {url}")
-        print(f"  Point Settings -> Target URLs at that address, then Start.")
-        print(f"  Ctrl-C to stop.\n")
+        base = f"http://127.0.0.1:{args.port}"
+        print("\n  Mock offer forms running:")
+        print(f"    American Emergency Fund   {base}/aef/index.html")
+        print(f"    MyLendingWallet           {base}/mlw/index.html")
+        print("\n  Point Settings -> Target URLs at one of these, then Start.")
+        print("  Ctrl-C to stop.\n")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
