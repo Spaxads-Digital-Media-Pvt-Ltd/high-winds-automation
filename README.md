@@ -1,8 +1,18 @@
 # 🚀 Lead Automation Engine
 
 Reads leads from Google Sheets, rotates proxy + device fingerprint per attempt,
-fills the **American Emergency Fund** loan application via Playwright, and writes
-the result back to the sheet.
+fills a loan application via Playwright, and writes the result back to the sheet.
+
+Two offers, both on the same lead platform:
+
+| Offer | Front-end | Sheet tab |
+|-------|-----------|-----------|
+| American Emergency Fund | server-rendered Bootstrap wizard | `Sheet1` |
+| MyLendingWallet | React SPA (react-hook-form) | `Sheet2` |
+
+`core/lead_platform.py` holds everything the two share — the 31-field
+vocabulary, sheet parsing, value mapping and validation, and the browser
+lifecycle. Each filler subclasses it and implements only its own DOM layer.
 
 ---
 
@@ -24,7 +34,9 @@ lead-automation/
 │   ├── stealth.py          # Anti-detection JS patches + human-like helpers
 │   └── lead_pacer.py       # Hour-by-hour lead release scheduler
 ├── core/
-│   └── form_filler_aef.py  # americanemergencyfund.com form automation
+│   ├── lead_platform.py    # shared platform layer (parsing, mapping, browser lifecycle)
+│   ├── form_filler_aef.py  # americanemergencyfund.com — Bootstrap wizard DOM
+│   └── form_filler_mlw.py  # mylendingwallet.com — React SPA DOM
 ├── logs/                   # Structured log files (git-ignored)
 └── screenshots/            # Live preview + failure captures (git-ignored)
 ```
@@ -124,6 +136,32 @@ Full field/value reference is in the module docstring of
 declined with offers) or a redirect to `offer.requestedresults.com` (declined /
 rejected / processing error). Both are recorded as delivered, with the specific
 outcome written to the sheet's `Notes` column.
+
+---
+
+## ⚠️ Validating the MyLendingWallet filler
+
+**The MLW filler is not yet verified end-to-end.** What is confirmed against the
+live page: the 31-field vocabulary and backend endpoints are identical to AEF
+(read from the site's own JS bundle), the form renders under Chrome, field
+detection works despite the per-render form id, `loanreqamt` fills and reads
+back correctly, and the step-0 advance button is "Start Request Now".
+
+What is *inferred*, not verified: the option labels for steps 1+. They are taken
+from AEF's vocabulary because both sites share the platform's copy, and step 0's
+three labels match exactly — but the site fetches step content from the server
+at runtime, so it is not in the bundle and could not be read statically.
+
+Walking further requires submitting to the live advertiser, which has not been
+done. To finish validation, either:
+
+* run one real, consented lead through it and read the run log — every
+  unmatched label is logged with `form.choice_not_found` including the labels
+  actually on screen, so one pass identifies any gap; or
+* walk the form manually in a browser and capture each step's button labels.
+
+The filler fails loudly rather than silently on a mismatch: `unhandled_step` for
+an unrecognised field, `field_rejected` for a label it cannot find.
 
 ---
 

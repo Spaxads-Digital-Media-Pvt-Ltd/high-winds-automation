@@ -45,6 +45,14 @@ OFFERS: dict[str, dict] = {
         "sheet_url_env": "SHEET_URL_AEF",
         "sheet_ws_env":  "SHEET_WS_AEF",
     },
+    "my_lending_wallet": {
+        "name":          "MyLendingWallet",
+        "url":           "https://www.mylendingwallet.com/",
+        "filler":        "core.form_filler_mlw",
+        "color":         "#4ade80",
+        "sheet_url_env": "SHEET_URL_MLW",
+        "sheet_ws_env":  "SHEET_WS_MLW",
+    },
 }
 
 # Pristine defaults — captured before any saved overrides are applied so the

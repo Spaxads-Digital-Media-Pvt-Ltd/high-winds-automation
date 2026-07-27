@@ -1,0 +1,511 @@
+"""
+core/form_filler_mlw.py — mylendingwallet.com multi-step form automation.
+
+Same lead platform as americanemergencyfund.com — the site's own JS bundle
+carries the identical 31-field vocabulary and posts to the identical endpoints
+(``/?cmd=ExtApplyV2``, ``/?cmd=RenderResult``) — but a completely different
+front-end: a React SPA (``template/10666``, Vite build) using react-hook-form,
+rather than AEF's server-rendered Bootstrap wizard.  All value mapping is
+therefore inherited unchanged from BasePlatformFiller; only the DOM layer here
+differs.
+
+DOM differences from AEF, confirmed against the live page:
+
+  * The <form> id is generated per render (e.g. ``tf---fcg23sw``) and cannot be
+    used as an anchor.  We scope to the form element that actually contains
+    platform-named fields instead.
+  * Choices are <button> elements carrying the option's visible label — there
+    are no <input type=radio> value attributes to target.  Selection is
+    therefore by label text, using the platform's shared label vocabulary
+    (verified identical to AEF at step 0: "up to $1,000" / "up to $3,000" /
+    "above + $3,000").
+  * Inputs do carry platform ``name`` attributes (``loanreqamt`` confirmed), so
+    the field-driven dispatch inherited from the AEF work applies directly.
+  * react-hook-form ignores a plain value assignment: setting a field requires
+    real typing, or a native-setter write followed by input/change/blur, which
+    is what ``_text`` below does.
+
+Step content is fetched from the server at runtime — it is not in the JS bundle
+— so the step sequence is discovered live, exactly as on AEF.
+
+⚠️  UNVERIFIED: the DOM contract above is confirmed for step 0 only.  Walking
+further requires submitting data to the live advertiser, which has not been
+done.  Label vocabulary for later steps is inferred from AEF (same platform,
+and step 0's labels match exactly).  Selectors are written defensively and log
+what they actually see, but this filler has NOT been validated end-to-end
+against the real form.  See README → "Validating the MyLendingWallet filler".
+"""
+from __future__ import annotations
+
+import re
+import time
+from typing import Callable
+
+import structlog
+from playwright.sync_api import Page
+
+from core.lead_platform import BasePlatformFiller, FormFillerError, _digits
+
+log = structlog.get_logger(__name__)
+
+__all__ = ["FormFiller", "FormFillerError"]
+
+# Option label vocabulary, shared with AEF (same platform copy).  Selection is
+# by label because this front-end renders choices as <button>, not <input>.
+_CHOICE_LABELS: dict[str, dict[str, list[str]]] = {
+    "loanreqamt": {"1000": ["up to $1,000"], "3000": ["up to $3,000"],
+                   "5000": ["above + $3,000", "above $3,000"]},
+    "hmonthsat":  {"60": ["5 years or more"], "48": ["4 years"], "36": ["3 years"],
+                   "24": ["2 years"], "12": ["1 year or less"]},
+    "emonthsat":  {"60": ["5 years or more"], "48": ["4 years"], "36": ["3 years"],
+                   "24": ["2 years"], "12": ["1 year or less"]},
+    "bmonthsat":  {"60": ["5 years or more"], "48": ["4 years"], "36": ["3 years"],
+                   "24": ["2 years"], "12": ["1 year or less"]},
+    "ishowner":   {"1": ["Yes"], "0": ["No"]},
+    "isactmil":   {"1": ["Yes"], "0": ["No"]},
+    "isdd":       {"1": ["Yes"], "0": ["No"]},
+    "priincsrc":  {"1": ["Employed or self employed", "Employed"],
+                   "2": ["Benefits or not employed", "Benefits"]},
+    "payfreq":    {"1": ["Weekly"], "2": ["Bi-Weekly", "Biweekly"],
+                   "3": ["Monthly"], "4": ["Semi-Monthly", "Semi Monthly"]},
+    "bacctype":   {"1": ["Checking"], "2": ["Savings", "Saving"]},
+    "crscore":    {"2": ["Great 700+", "Great", "700+"], "3": ["600 - 700", "600-700"],
+                   "4": ["500 - 600", "500-600"], "5": ["Below 500", "less than 500"],
+                   "1": ["Not Sure", "Not sure"]},
+    "loanreason": {"14": ["Credit card debt relief"], "1": ["Debt consolidation"],
+                   "13": ["Other reasons", "Other"]},
+    "netim":      {"11000": ["$10,000 or More"], "10000": ["$9,000 - $10,000"],
+                   "9000": ["$8,000 - $9,000"], "8000": ["$7,000 - $8,000"],
+                   "7000": ["$6,000 - $7,000"], "6000": ["$5,000 - $6,000"],
+                   "5000": ["$4,000 - $5,000"], "4000": ["$3,000 - $4,000"],
+                   "3000": ["$2,500 - $3,000"], "2500": ["$2,000 - $2,500"],
+                   "2000": ["$1,500 - $2,000"], "1500": ["Below $1500", "Below $1,500"]},
+    "i_ad_ccDebtAmt": {"0": ["none", "None"], "4999": ["$1,000 - $4,999"],
+                       "9999": ["$5,000 - $9,999"], "14999": ["$10,000 - $14,999"],
+                       "19999": ["$15,000 - $19,999"], "24999": ["$20,000 - $24,999"],
+                       "29999": ["$25,000 - $29,999"], "34999": ["$30,000 - $34,999"],
+                       "39999": ["$35,000 - $39,999"], "44999": ["$40,000 - $44,999"],
+                       "49999": ["$45,000 - $49,999"], "50000": ["$50,000 +", "$50,000+"]},
+}
+
+# Buttons that advance rather than choose.  "Start Request Now" is this site's
+# step-0 call to action — observed live, not guessed.
+_ADVANCE_RE = (r"^(continue|next|submit|request loan|get started|start request now"
+               r"|see my offer.*|finish)$")
+
+
+class FormFiller(BasePlatformFiller):
+    """mylendingwallet.com — React SPA over the shared lead platform."""
+
+    default_url = "https://www.mylendingwallet.com/"
+
+    # ------------------------------------------------------------------ setup
+
+    def _prepare(self, page: Page, row_number: int) -> None:
+        """Dismiss any consent / splash gate standing before the first step."""
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if self._form_ready(page):
+                return
+            try:
+                clicked = page.evaluate(
+                    """() => {
+                        const vis = e => e && e.offsetParent !== null;
+                        const re = /^(i agree|agree|accept|continue|get started|start)$/i;
+                        const b = Array.from(document.querySelectorAll('button,[role=button]'))
+                            .filter(vis).filter(e => !e.disabled)
+                            .find(e => re.test((e.innerText || '').trim()));
+                        if (b) { b.click(); return (b.innerText || '').trim(); }
+                        return null;
+                    }"""
+                )
+            except Exception:
+                clicked = None
+            if clicked:
+                log.info("form.gate_clicked", label=clicked, row=row_number)
+                time.sleep(1.2)
+            else:
+                time.sleep(1)
+
+    def _form_ready(self, page: Page) -> bool:
+        try:
+            return bool(page.evaluate(self._JS_READY))
+        except Exception:
+            return False
+
+    # The form id is generated per render, so anchor on "the form that contains
+    # platform-named fields" — or the document, if the fields sit outside a form.
+    _JS_PLATFORM_FIELDS = """
+        const NAMES = ['loanreqamt','fname','lname','dob','email','lastfourssn','phhm',
+          'haddress1','hpostal','hcity','hstate','i_ad_ccDebtAmt','hmonthsat','ishowner',
+          'netim','priincsrc','payfreq','isactmil','ename','emonthsat','phwrk','licn',
+          'licst','ssn','bacctype','bmonthsat','isdd','crscore','loanreason','baba','bacc'];
+        const lower = NAMES.map(n => n.toLowerCase());
+        const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
+    """
+
+    _JS_READY = "() => {" + _JS_PLATFORM_FIELDS + """
+        const els = Array.from(document.querySelectorAll('input[name],select[name],textarea[name]'));
+        return els.some(e => vis(e) && lower.includes((e.name || '').toLowerCase()));
+    }"""
+
+    # ------------------------------------------------------------- form flow
+
+    def _fill_form(self, page: Page, f: dict, row_number: int, stop_event) -> str:
+        for _ in range(60):
+            self._check_stop(stop_event)
+            if self._form_ready(page) or self._completion_state(page):
+                break
+            time.sleep(0.5)
+        else:
+            self._screenshot(page, row_number, "no_form")
+            raise FormFillerError("Application form never rendered", error_type="stuck")
+
+        seen: dict[str, int] = {}
+        for step_num in range(self._max_steps):
+            self._check_stop(stop_event)
+
+            done = self._completion_state(page)
+            if done:
+                log.info("form.completed", step=step_num, outcome=done, row=row_number)
+                return done
+
+            names = self._visible_field_names(page)
+            choices = self._visible_choices(page)
+            if not names and not choices:
+                time.sleep(1.5)
+                continue
+
+            sig = ",".join(sorted(names)) or "choices:" + ",".join(sorted(choices))[:60]
+            seen[sig] = seen.get(sig, 0) + 1
+            if seen[sig] > 3:
+                self._screenshot(page, row_number, f"stuck_{step_num}")
+                raise FormFillerError(
+                    f"Form stopped advancing at step {step_num} (fields: {sig})",
+                    error_type="stuck",
+                )
+
+            log.info("form.step", step=step_num, fields=sig[:70],
+                     choices=choices[:6], row=row_number)
+            self._live(page)
+
+            res = self._handle_step(page, names, f)
+            if not res["known"]:
+                self._screenshot(page, row_number, f"unhandled_{step_num}")
+                raise FormFillerError(
+                    f"Unrecognised step {step_num} — fields={sig} choices={choices[:8]}",
+                    error_type="unhandled_step",
+                )
+            if not res["filled"]:
+                self._screenshot(page, row_number, f"unfilled_{step_num}")
+                raise FormFillerError(
+                    f"Could not set any field on step {step_num}: {res['failed']} "
+                    f"(value rejected, or option label not found among {choices[:8]})",
+                    error_type="field_rejected",
+                )
+            if res["failed"]:
+                log.warning("form.partial_step", step=step_num, filled=res["filled"],
+                            failed=res["failed"], row=row_number)
+
+            self._action_pause()
+            self._click_next(page)
+            self._await_change(page, sig)
+            self._live(page)
+
+        raise FormFillerError(
+            f"Form did not complete within {self._max_steps} steps", error_type="timeout")
+
+    def _handle_step(self, page: Page, names: list[str], f: dict) -> dict:
+        """Fill every platform field the current step exposes."""
+        def choice(field: str, value: str) -> bool:
+            return self._choose(page, field, value)
+
+        handlers: dict[str, Callable[[], bool]] = {
+            "loanreqamt":     lambda: self._set_loan_amount(page, f),
+            "fname":          lambda: self._text(page, "fname", f["first_name"]),
+            "lname":          lambda: self._text(page, "lname", f["last_name"]),
+            "dob":            lambda: self._text(page, "dob", f["dob"]),
+            "email":          lambda: self._text(page, "email", f["email"]),
+            "lastfourssn":    lambda: self._text(page, "lastfourssn", f["last_ssn"]),
+            "phhm":           lambda: self._text(page, "phhm", f["phone"]),
+            "phwrk":          lambda: self._text(page, "phwrk", f["employer_phone"]),
+            "hpostal":        lambda: self._text(page, "hpostal", f["zip"]),
+            "haddress1":      lambda: self._text(page, "haddress1", f["street_address"]),
+            "hcity":          lambda: self._text(page, "hcity", f["city"]),
+            "hstate":         lambda: self._set(page, "hstate", f["state"]),
+            "ename":          lambda: self._text(page, "ename", f["employer_name"]),
+            "licn":           lambda: self._text(page, "licn", f["dl_number"]),
+            "licst":          lambda: self._set(page, "licst", f["dl_state"]),
+            "ssn":            lambda: self._text(page, "ssn", f["ssn"]),
+            "baba":           lambda: self._text(page, "baba", f["routing_number"]),
+            "bacc":           lambda: self._text(page, "bacc", f["account_number"]),
+            "bname":          lambda: self._text(page, "bname", f["bank_name"]),
+            "i_ad_ccDebtAmt": lambda: self._set(page, "i_ad_ccDebtAmt", f["debt_bracket"]),
+            "netim":          lambda: self._set(page, "netim", f["income_bracket"]),
+            "hmonthsat":      lambda: choice("hmonthsat", f["address_months"]),
+            "emonthsat":      lambda: choice("emonthsat", f["employer_months"]),
+            "bmonthsat":      lambda: choice("bmonthsat", f["bank_months"]),
+            "ishowner":       lambda: choice("ishowner", f["is_homeowner"]),
+            "isactmil":       lambda: choice("isactmil", f["is_military"]),
+            "isdd":           lambda: choice("isdd", f["is_direct_deposit"]),
+            "priincsrc":      lambda: choice("priincsrc", f["income_source"]),
+            "payfreq":        lambda: choice("payfreq", f["pay_freq"]),
+            "bacctype":       lambda: choice("bacctype", f["account_type"]),
+            "crscore":        lambda: choice("crscore", f["credit_score"]),
+            "loanreason":     lambda: choice("loanreason", f["loan_reason"]),
+        }
+
+        known, filled, failed = [], [], []
+        for name in names:
+            fn = handlers.get(name)
+            if fn is None:
+                log.warning("form.unknown_field", field=name)
+                continue
+            known.append(name)
+            try:
+                (filled if fn() else failed).append(name)
+            except Exception as e:
+                failed.append(name)
+                log.warning("form.field_error", field=name,
+                            error=f"{type(e).__name__}: {e}"[:110])
+        return {"known": known, "filled": filled, "failed": failed}
+
+    # ----------------------------------------------------------- interactions
+
+    def _visible_field_names(self, page: Page) -> list[str]:
+        try:
+            return page.evaluate("() => {" + self._JS_PLATFORM_FIELDS + """
+                const out = [];
+                document.querySelectorAll('input[name],select[name],textarea[name]').forEach(e => {
+                    const n = (e.name || '');
+                    const i = lower.indexOf(n.toLowerCase());
+                    if (i < 0) return;
+                    if (e.type === 'hidden' || !vis(e)) return;
+                    if (!out.includes(NAMES[i])) out.push(NAMES[i]);
+                });
+                return out;
+            }""") or []
+        except Exception:
+            return []
+
+    def _visible_choices(self, page: Page) -> list[str]:
+        """Labels of the clickable choice buttons on the current step."""
+        try:
+            return page.evaluate(r"""() => {
+                const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
+                const skip = /^(back|\?|continue|next|submit|request loan)$/i;
+                return Array.from(document.querySelectorAll('button,[role=button]'))
+                    .filter(vis).filter(e => !e.disabled)
+                    .map(e => (e.innerText || '').replace(/\s+/g, ' ').trim())
+                    .filter(t => t && t.length < 60 && !skip.test(t));
+            }""") or []
+        except Exception:
+            return []
+
+    def _text(self, page: Page, name: str, value: str) -> bool:
+        """Type into a react-hook-form input, verifying by read-back."""
+        value = str(value or "")
+        if not value:
+            return False
+        sel = f'[name="{name}"]'
+        try:
+            loc = page.locator(sel).first
+            loc.wait_for(state="visible", timeout=8000)
+            loc.click()
+            loc.fill("")
+            loc.press_sequentially(value, delay=self._key_delay())
+            loc.blur()
+        except Exception as e:
+            log.warning("form.type_failed", field=name, error=str(e)[:80])
+
+        got = self._read_back(page, name)
+        if _digits(got) == _digits(value) or got.strip() == value.strip():
+            return True
+
+        # react-hook-form only observes events, so a bare value write is ignored:
+        # use the native setter then fire the events its listeners subscribe to.
+        try:
+            page.evaluate(
+                """([n, v]) => {
+                    const el = document.querySelector('[name="' + n + '"]');
+                    if (!el) return;
+                    const proto = el instanceof HTMLTextAreaElement
+                        ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
+                    el.dispatchEvent(new Event('input',  { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.dispatchEvent(new Event('blur',   { bubbles: true }));
+                }""",
+                [name, value],
+            )
+        except Exception as e:
+            log.warning("form.set_failed", field=name, error=str(e)[:80])
+        got = self._read_back(page, name)
+        ok = _digits(got) == _digits(value) or got.strip() == value.strip()
+        if not ok:
+            log.warning("form.value_mismatch", field=name, wanted=value[:20], got=got[:20])
+        return ok
+
+    def _read_back(self, page: Page, name: str) -> str:
+        try:
+            return page.evaluate(
+                """(n) => { const el = document.querySelector('[name="' + n + '"]');
+                            return el ? (el.value || '') : ''; }""", name) or ""
+        except Exception:
+            return ""
+
+    def _set(self, page: Page, name: str, value: str) -> bool:
+        """A platform 'select' field: native <select> if present, else the
+        button/listbox rendering used elsewhere in this SPA."""
+        if not value:
+            return False
+        is_select = False
+        try:
+            is_select = bool(page.evaluate(
+                """(n) => { const e = document.querySelector('[name="' + n + '"]');
+                            return !!e && e.tagName === 'SELECT'; }""", name))
+        except Exception:
+            pass
+        if is_select:
+            loc = page.locator(f'select[name="{name}"]').first
+            for kwargs in ({"value": value}, {"label": value}):
+                try:
+                    loc.select_option(timeout=6000, **kwargs)
+                    return True
+                except Exception:
+                    pass
+            try:
+                if page.evaluate(
+                    """([n, v]) => {
+                        const sel = document.querySelector('select[name="' + n + '"]');
+                        if (!sel) return null;
+                        const want = String(v).trim().toLowerCase();
+                        const hit = Array.from(sel.options).find(
+                            o => o.value.trim().toLowerCase() === want ||
+                                 o.text.trim().toLowerCase() === want);
+                        if (!hit) return null;
+                        sel.value = hit.value;
+                        sel.dispatchEvent(new Event('input',  { bubbles: true }));
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                        return hit.value;
+                    }""", [name, value]) is not None:
+                    return True
+            except Exception as e:
+                log.warning("form.select_failed", field=name, error=str(e)[:80])
+            return False
+        # Not a native select — fall back to label-based choosing.
+        return self._choose(page, name, value)
+
+    def _choose(self, page: Page, field: str, value: str) -> bool:
+        """Click the choice whose visible label maps to ``value``.
+
+        This front-end renders options as <button>, so there is no value
+        attribute to match — selection is by the platform's label vocabulary,
+        with a normalised comparison and a contains-fallback.
+        """
+        if not value:
+            return False
+        labels = _CHOICE_LABELS.get(field, {}).get(str(value), [])
+        if not labels:
+            log.warning("form.no_label_mapping", field=field, value=value)
+            return False
+        try:
+            hit = page.evaluate(
+                """([labels, field]) => {
+                    const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
+                    const norm = s => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const wanted = labels.map(norm);
+                    let els = Array.from(document.querySelectorAll(
+                        'button,[role=button],[role=radio],[role=option],label'));
+                    els = els.filter(vis).filter(e => !e.disabled);
+                    let hit = els.find(e => wanted.includes(norm(e.innerText)));
+                    if (!hit) hit = els.find(e => {
+                        const t = norm(e.innerText);
+                        return t && wanted.some(w => t === w || (w.length > 3 && t.includes(w)));
+                    });
+                    if (!hit) return null;
+                    hit.click();
+                    return (hit.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 40);
+                }""",
+                [labels, field],
+            )
+            if hit:
+                log.info("form.choice", field=field, value=value, label=hit)
+                return True
+            log.warning("form.choice_not_found", field=field, value=value,
+                        wanted=labels, seen=self._visible_choices(page)[:8])
+        except Exception as e:
+            log.warning("form.choice_failed", field=field, error=str(e)[:80])
+        return False
+
+    def _set_loan_amount(self, page: Page, f: dict) -> bool:
+        """Step 0 offers a free-text amount box plus three bucket buttons."""
+        amount = f["loan_amount"]
+        try:
+            has_input = bool(page.locator('[name="loanreqamt"]').count())
+        except Exception:
+            has_input = False
+        if has_input and self._text(page, "loanreqamt", str(amount)):
+            return True
+        bucket = "1000" if amount <= 1000 else "3000" if amount <= 3000 else "5000"
+        return self._choose(page, "loanreqamt", bucket)
+
+    def _click_next(self, page: Page) -> None:
+        """Advance. Many steps in this SPA auto-advance on choice, so a missing
+        Continue button is normal rather than an error."""
+        try:
+            page.evaluate(
+                """(re) => {
+                    const rx = new RegExp(re, 'i');
+                    const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
+                    const b = Array.from(document.querySelectorAll(
+                        'button,[role=button],input[type=submit]'))
+                        .filter(vis).filter(e => !e.disabled)
+                        .find(e => rx.test((e.innerText || e.value || '').replace(/\\s+/g,' ').trim()));
+                    if (b) b.click();
+                }""",
+                _ADVANCE_RE,
+            )
+        except Exception as e:
+            log.warning("form.next_failed", error=str(e)[:80])
+
+    def _await_change(self, page: Page, prev_sig: str, timeout: float = 20.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.6)
+            if self._completion_state(page):
+                return
+            names = self._visible_field_names(page)
+            if names and ",".join(sorted(names)) != prev_sig:
+                return
+            if not names and prev_sig.startswith("choices:"):
+                return
+            err = self._validation_error(page)
+            if err:
+                log.warning("form.validation_error", error=err[:110])
+                return
+
+    def _validation_error(self, page: Page) -> str:
+        try:
+            return page.evaluate(
+                """() => {
+                    const vis = e => e.offsetParent !== null;
+                    const el = Array.from(document.querySelectorAll(
+                        '[role=alert],[aria-invalid=true]+*,.error,.text-red-500,.text-destructive'))
+                        .filter(vis)[0];
+                    return el ? (el.innerText || '').trim().slice(0, 160) : '';
+                }""") or ""
+        except Exception:
+            return ""
+
+    def _completion_state(self, page: Page) -> str:
+        try:
+            url = page.url or ""
+        except Exception:
+            return ""
+        if "cmd=RenderResult" in url:
+            return "offers page (RenderResult)"
+        if "offer.requestedresults.com" in url:
+            m = re.search(r"subid=([\w]+)", url)
+            return f"redirected to offers ({m.group(1)})" if m else "redirected to offers"
+        return ""

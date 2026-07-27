@@ -1,11 +1,12 @@
 {
   "urls": {
-    "american_emergency_fund": "https://www.americanemergencyfund.com/"
+    "american_emergency_fund": "https://digipalz.trackog.net/c?oid=35&affid=442&g1={clickid-macro-replace}&source={affid-macro-replace}",
+    "my_lending_wallet": "https://www.mylendingwallet.com/"
   },
   "proxy": {
     "source": "none",
-    "rotating_url": "",
-    "env_list": ""
+    "rotating_url": "http://tFxQm6EDdVq1B4d3:mobile;us;;;@proxy.froxy.com:9000",
+    "env_list": "http://user:pass@proxy1.example.com:8080,socks5://user:pass@proxy2.example.com:1080"
   },
   "scheduled_jobs": [],
   "browser": {
