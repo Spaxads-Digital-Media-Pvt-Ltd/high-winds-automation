@@ -61,6 +61,17 @@ ALL_OFFERS: dict[str, dict] = {
         # unattended yet.  Re-enable once that last step is confirmed.
         "enabled":       False,
     },
+    "roundsky": {
+        "name":          "Round Sky (ping-post)",
+        # Server-to-server: no browser, so the URL is informational only —
+        # the real endpoint comes from ROUNDSKY_ENDPOINT / config.yaml.
+        "url":           "https://www.leadhorizon.com/leads/payday/test.php",
+        "filler":        "core.poster_roundsky",
+        "color":         "#fbbf24",
+        "sheet_url_env": "SHEET_URL_ROUNDSKY",
+        "sheet_ws_env":  "SHEET_WS_ROUNDSKY",
+        "enabled":       True,
+    },
 }
 
 # What the UI, the engines and the scheduler actually see.  Disabled offers are
@@ -555,6 +566,23 @@ def _run_engine(offer_id: str, target_url: str) -> None:
                         eng["stats"]["processed"] += 1
                         success = True
                         _log(offer_id, f"ERR   Row {row_num} -> Failed (missing data)")
+                        break
+
+                    # Terminal buyer outcomes — reposting the same lead will get
+                    # the same answer, so these never retry.  "declined" already
+                    # walked its own price ladder before giving up; "filtered"
+                    # means the lead can never qualify for this buyer.
+                    if e.error_type in ("declined", "filtered", "config"):
+                        status = {"declined": "Declined", "filtered": "Filtered",
+                                  "config": "Failed"}[e.error_type]
+                        sheet.update_row(row_num, status=status,
+                                         notes=f"[{e.error_type}] {e}",
+                                         proxy_used=proxy_display, ip=proxy_ip,
+                                         retry_count=retry_count + attempt)
+                        eng["stats"]["failed"]    += 1
+                        eng["stats"]["processed"] += 1
+                        success = True
+                        _log(offer_id, f"ERR   Row {row_num} -> {status}: {str(e)[:70]}")
                         break
 
                     attempt += 1
