@@ -58,6 +58,15 @@ ALL_OFFERS: dict[str, dict] = {
         "sheet_ws_env":  "SHEET_WS_MLW",
         "enabled":       True,
     },
+    "low_credit": {
+        "name":          "Low Credit Finance",
+        "url":           "https://lowcreditfinance.com/",
+        "filler":        "core.form_filler_lowcredit",
+        "color":         "#f472b6",
+        "sheet_url_env": "SHEET_URL_LOW_CREDIT",
+        "sheet_ws_env":  "SHEET_WS_LOW_CREDIT",
+        "enabled":       True,
+    },
 }
 
 # What the UI, the engines and the scheduler actually see.  Disabled offers are

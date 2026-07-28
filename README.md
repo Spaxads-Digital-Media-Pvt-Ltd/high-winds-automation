@@ -3,19 +3,24 @@
 Reads leads from Google Sheets, rotates proxy + device fingerprint per attempt,
 fills a loan application via Playwright, and writes the result back to the sheet.
 
-Two offers, both on the same lead platform:
+Three offers:
 
-| Offer | Front-end | Sheet tab |
-|-------|-----------|-----------|
-| American Emergency Fund | server-rendered Bootstrap wizard | `Sheet1` |
-| MyLendingWallet | React SPA (react-hook-form) | `Sheet2` |
+| Offer | Front-end | Sheet tab | Filler |
+|-------|-----------|-----------|--------|
+| American Emergency Fund | server-rendered Bootstrap wizard | `Sheet1` | `form_filler_aef` (shared platform) |
+| MyLendingWallet | React SPA (react-hook-form) | `Sheet2` | `form_filler_mlw` (shared platform) |
+| Low Credit Finance | iframe.global multi-step form | `Sheet3` | `form_filler_lowcredit` (standalone) |
 
 Each offer carries an `enabled` flag in `ALL_OFFERS` ([app.py](app.py)); setting
 it to `False` takes an offer out of the UI without deleting anything.
 
-`core/lead_platform.py` holds everything the two share — the 31-field
-vocabulary, sheet parsing, value mapping and validation, and the browser
-lifecycle. Each filler subclasses it and implements only its own DOM layer.
+AEF and MyLendingWallet run the same backend lead platform, so
+`core/lead_platform.py` holds everything they share — the 31-field vocabulary,
+sheet parsing, value mapping and validation, and the browser lifecycle — and
+each filler subclasses it with only its own DOM layer. Low Credit Finance is a
+different platform (an `iframe.global` embedded funnel), so its filler is
+standalone; it is interface-compatible with the engine (same
+`FormFiller`/`FormFillerError`/`process_row` contract).
 
 ---
 
