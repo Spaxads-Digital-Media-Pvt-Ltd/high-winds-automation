@@ -205,6 +205,14 @@ class FormFiller(BasePlatformFiller):
                 log.info("form.completed", step=step_num, outcome=done, row=row_number)
                 return done
 
+            # A returning applicant (same identity seen before) is met with a
+            # "Welcome Back" screen that skips the questions and offers a single
+            # Request Loan button resubmitting their stored application.  Handle
+            # it wherever it appears rather than treating it as an empty step.
+            if self._maybe_welcome_back(page, row_number):
+                time.sleep(2)
+                continue
+
             names = self._visible_field_names(page)
             choices = self._visible_choices(page)
             if not names and not choices:
@@ -246,6 +254,16 @@ class FormFiller(BasePlatformFiller):
                      choices=choices[:6], row=row_number)
             self._live(page)
             self._read_pause()          # human beat: read the step before filling
+
+            # The read beat can let a returning-applicant screen swap the fields
+            # out from under us (the site recognises the identity mid-flow). If
+            # everything we were about to fill has vanished, we are no longer on
+            # that step — deal with the new screen instead of typing into a gone
+            # field (this is the phhm-on-Welcome-Back failure).
+            if not any(self._present(page, n) for n in names):
+                self._maybe_welcome_back(page, row_number)
+                time.sleep(1.5)
+                continue
 
             res = self._handle_step(page, names, f)
             if not res["known"]:
@@ -469,6 +487,37 @@ class FormFiller(BasePlatformFiller):
         if not ok:
             log.warning("form.value_mismatch", field=name, wanted=value[:20], got=got[:20])
         return ok
+
+    def _maybe_welcome_back(self, page: Page, row_number: int) -> bool:
+        """If the current screen is a returning-applicant 'Welcome Back' page,
+        click its Request Loan button (which resubmits the stored application)
+        and return True.  Returns False on any normal step.
+
+        Fresh, unique lead identities never see this; it only appears when the
+        same person has applied before.  Left unhandled it looks like an empty
+        step with no fillable fields — which is exactly how the phone step
+        appeared to fail once these test identities had been submitted."""
+        try:
+            clicked = page.evaluate(
+                r"""() => {
+                    const body = document.body ? document.body.innerText : '';
+                    if (!/welcome\s+back/i.test(body)) return null;
+                    const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
+                    const re = /^(request loan|view cash offers|see (my )?offers?|continue|submit|request)/i;
+                    const b = Array.from(document.querySelectorAll(
+                        'button,[role=button],a,input[type=submit]'))
+                        .filter(vis).filter(e => !e.disabled)
+                        .find(e => re.test((e.innerText || e.value || '').replace(/\s+/g, ' ').trim()));
+                    if (b) { b.click(); return (b.innerText || b.value || '').replace(/\s+/g, ' ').trim().slice(0, 40); }
+                    return '';
+                }"""
+            )
+        except Exception:
+            clicked = None
+        if clicked:
+            log.info("form.welcome_back", action=clicked, row=row_number)
+            return True
+        return False
 
     def _signature(self, page: Page) -> str:
         """Identity of the step currently on screen."""
