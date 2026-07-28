@@ -58,17 +58,6 @@ ALL_OFFERS: dict[str, dict] = {
         "sheet_ws_env":  "SHEET_WS_MLW",
         "enabled":       True,
     },
-    "roundsky": {
-        "name":          "Round Sky (ping-post)",
-        # Server-to-server: no browser, so the URL is informational only —
-        # the real endpoint comes from ROUNDSKY_ENDPOINT / config.yaml.
-        "url":           "https://www.leadhorizon.com/leads/payday/test.php",
-        "filler":        "core.poster_roundsky",
-        "color":         "#fbbf24",
-        "sheet_url_env": "SHEET_URL_ROUNDSKY",
-        "sheet_ws_env":  "SHEET_WS_ROUNDSKY",
-        "enabled":       True,
-    },
 }
 
 # What the UI, the engines and the scheduler actually see.  Disabled offers are

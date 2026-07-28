@@ -17,16 +17,6 @@ target:
 form:
   max_steps: 40                 # safety cap on wizard iterations per lead
 
-# --- Round Sky / LeadHorizon ping-post (server-to-server, no browser) ---
-roundsky:
-  endpoint: "test"              # test | live  — ROUNDSKY_ENDPOINT overrides
-  sub_id: ""                    # one id per traffic source; ROUNDSKY_SUB_ID overrides
-  domain: ""                    # domain the lead came from, no http://
-  time_allowed: 30              # seconds the buyer network may ping (min 20)
-  # Post one minimum_price at a time, descending, until the lead sells.
-  minimum_prices: [50, 20, 3]
-  tier: ""                      # legacy alternative — never sent alongside prices
-
 # --- Retry & Backoff ---
 retry:
   max_retries: 1                # Retries per row after the first attempt (1 initial + 1 retry = 2 total)

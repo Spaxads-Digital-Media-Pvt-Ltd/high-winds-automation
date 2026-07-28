@@ -17,3 +17,4 @@ proxies.txt
 
 # OS cruft
 .DS_Store
+.env.roundsky.bak

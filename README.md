@@ -5,16 +5,13 @@ fills a loan application via Playwright, and writes the result back to the sheet
 
 Two offers, both on the same lead platform:
 
-| Offer | Delivery | Sheet tab | Status |
-|-------|----------|-----------|--------|
-| American Emergency Fund | browser (Bootstrap wizard) | `Sheet1` | live |
-| MyLendingWallet | browser (React SPA) | `Sheet2` | **parked** |
-| Round Sky | **server-to-server ping-post** | `Sheet3` | test endpoint |
+| Offer | Front-end | Sheet tab |
+|-------|-----------|-----------|
+| American Emergency Fund | server-rendered Bootstrap wizard | `Sheet1` |
+| MyLendingWallet | React SPA (react-hook-form) | `Sheet2` |
 
-MyLendingWallet is currently disabled in the UI — `ALL_OFFERS[...]["enabled"] =
-False` in [app.py](app.py). Its filler, sheet tab, `.env` keys and mock all
-remain in place; flipping that flag back to `True` restores the card, engine,
-routes and scheduler entry with nothing else to change.
+Each offer carries an `enabled` flag in `ALL_OFFERS` ([app.py](app.py)); setting
+it to `False` takes an offer out of the UI without deleting anything.
 
 `core/lead_platform.py` holds everything the two share — the 31-field
 vocabulary, sheet parsing, value mapping and validation, and the browser
@@ -147,9 +144,6 @@ outcome written to the sheet's `Notes` column.
 
 ## ⚠️ Validating the MyLendingWallet filler
 
-> **Parked.** This offer is disabled in the UI (see above). The notes below
-> record where it got to, for whoever picks it up.
-
 **Verified against the live form** by walking every step (stopping before the
 final submit — no application was completed). All steps now fill and advance:
 loan amount · name/DOB · email/SSN-4 · phone · address+state · debt · homeowner ·
@@ -229,59 +223,6 @@ chrome`) — the bundled Chromium alone is not sufficient for this target.
 If the browser crashes anyway, the lead fails with `browser_crashed` /
 `stuck` rather than hanging the engine: a crashed renderer never acknowledges
 `close()`, so teardown is left to the Playwright driver instead.
-
----
-
-## 📮 Round Sky (server-to-server)
-
-[`core/poster_roundsky.py`](core/poster_roundsky.py) posts leads straight to
-Round Sky / LeadHorizon — no browser, no proxy, no fingerprint. It implements
-the same interface as the Playwright fillers, so the engine, sheet handling,
-scheduler and UI drive it unchanged, but a post takes well under a second
-instead of ~70s and returns a real decision and reason.
-
-**Price ladder.** Posts one `minimum_price` at a time, descending
-(`config.yaml → roundsky.minimum_prices`, default 50 → 20 → 3), stopping at the
-first buyer. A decline whose reason names a bad field (`invalid`, `missing`,
-`duplicate`, …) aborts the ladder immediately — reposting cheaper cannot fix it.
-
-**Filters applied before posting**, per Round Sky's requirements, so a lead that
-cannot qualify never leaves the machine: checking accounts only · no active
-military · no NY · age 20-80 · monthly income 1200-10000 · `work_phone` must
-differ from `home_phone`. These land as `Filtered` in the sheet.
-
-**Sheet statuses:** `Success` (approved — notes carry the price, message and
-redirect URL, `Submission_ID` holds the LEADID), `Declined`, `Filtered`,
-`Failed`. None of these retry; a repost would get the same answer.
-
-### Before going live
-
-```bash
-ROUNDSKY_SUB_ID=...      # one id per traffic source — NOT unique per lead
-ROUNDSKY_DOMAIN=...      # domain the lead came from, no http://
-ROUNDSKY_ENDPOINT=live   # stays on "test" until you are ready
-```
-
-Round Sky's three test steps have been completed against the test endpoint
-(decline parsed, approve parsed, redirect followed through to the confirmation
-page). The completion code returned was **`HAPPY BANANA!`** — give that to your
-rep to finish the API testing.
-
-### Two things the code will not fake
-
-`customer_ip` and `browser_info` are the **applicant's** own IP and User-Agent,
-and are what a buyer uses to judge where a lead came from. They are read from
-the sheet and a row without them is rejected — they are never synthesised.
-Capture them at lead-generation time.
-
-The docs also require that an approved lead has **the applicant's browser
-redirected** to the returned URL, and Round Sky pay only for approved leads that
-redirect once that rate falls below 90%. This module records the URL on the row
-but does not fetch it, because a server-side fetch is not a consumer redirect.
-`ROUNDSKY_FOLLOW_REDIRECT=true` is honoured only against the test endpoint,
-where it exists to complete their step-3 check.
-
----
 
 ## 🧪 Testing Without Submitting Real Applications
 
