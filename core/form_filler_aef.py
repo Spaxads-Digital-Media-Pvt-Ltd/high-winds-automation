@@ -161,6 +161,7 @@ class FormFiller(BasePlatformFiller):
 
             log.info("form.step", step=step_num, fields=sig[:70], row=row_number)
             self._live(page)
+            self._read_pause()          # human beat: read the step before filling
 
             res = self._handle_step(page, names, f)
             if not res["known"]:
@@ -239,6 +240,8 @@ class FormFiller(BasePlatformFiller):
                 if name != "customLoanAmount":
                     log.warning("form.unknown_field", field=name)
                 continue
+            if known:                       # not the first field on this step
+                self._field_pause()         # human beat between fields
             known.append(name)
             try:
                 (filled if fn() else failed).append(name)

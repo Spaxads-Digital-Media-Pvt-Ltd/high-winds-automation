@@ -43,12 +43,15 @@ pacing:
 
 # --- Delays (seconds) — human-like pacing ---
 delays:
-  min_typing_delay: 0.04        # Min delay between keystrokes
-  max_typing_delay: 0.12        # Max delay between keystrokes
+  min_typing_delay: 0.06        # Min delay between keystrokes
+  max_typing_delay: 0.15        # Max delay between keystrokes
   min_action_delay: 0.5         # Min pause between form actions
-  max_action_delay: 2.0         # Max pause between form actions
+  max_action_delay: 1.8         # Max pause between form actions
   page_load_wait: 3             # Extra wait after page load
   pre_submit_wait: 1.5          # Pause before clicking submit
+  # Human pacing for the browser fillers (AEF / MyLendingWallet):
+  read_pause:  [0.5, 1.2]       # beat after a step renders — "reading the question"
+  field_pause: [0.35, 0.8]      # beat between fields within a multi-field step
 
 # --- Device Emulation Defaults ---
 # These apply when Use_Custom_Device != "yes" in the sheet

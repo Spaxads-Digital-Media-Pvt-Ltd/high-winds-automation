@@ -260,6 +260,25 @@ class BasePlatformFiller:
         hi = float(self._delays.get("max_action_delay", 2.0))
         time.sleep(random.uniform(lo, hi))
 
+    def _pause_range(self, key: str, lo: float, hi: float) -> None:
+        """Sleep a random time in a [lo, hi] window read from config, so the
+        rhythm is tunable without code changes."""
+        import random
+        rng = self._delays.get(key)
+        if isinstance(rng, (list, tuple)) and len(rng) == 2:
+            lo, hi = float(rng[0]), float(rng[1])
+        time.sleep(random.uniform(lo, hi))
+
+    def _read_pause(self) -> None:
+        """Human beat after a fresh step renders — as if reading the question
+        before answering.  Keeps multi-step forms from feeling machine-paced."""
+        self._pause_range("read_pause", 0.5, 1.2)
+
+    def _field_pause(self) -> None:
+        """Human beat between fields within one step (name -> surname -> DOB),
+        which is what otherwise reads as a bot filling everything at once."""
+        self._pause_range("field_pause", 0.35, 0.8)
+
     def _check_stop(self, stop_event) -> None:
         if stop_event is not None and stop_event.is_set():
             raise FormFillerError("Stopped by user", error_type="stopped")
