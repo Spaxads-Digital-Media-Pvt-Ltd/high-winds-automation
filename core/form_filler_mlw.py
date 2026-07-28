@@ -217,6 +217,19 @@ class FormFiller(BasePlatformFiller):
                     names = [inferred]
 
             sig = ",".join(sorted(names)) or "choices:" + ",".join(sorted(choices))[:60]
+
+            # loanreqamt is the first question and cannot legitimately reappear.
+            # Seeing it again means the site dropped the session and restarted
+            # the wizard — grinding on from here just re-answers questions into
+            # a run that has already lost everything entered so far.
+            if sig == "loanreqamt" and step_num > 3:
+                self._screenshot(page, row_number, f"restarted_{step_num}")
+                raise FormFillerError(
+                    f"Form restarted from the first question at step {step_num} — "
+                    f"the site dropped the session mid-application",
+                    error_type="restarted",
+                )
+
             seen[sig] = seen.get(sig, 0) + 1
             if seen[sig] > 3:
                 self._screenshot(page, row_number, f"stuck_{step_num}")
@@ -587,15 +600,21 @@ class FormFiller(BasePlatformFiller):
           * Type-ahead does not engage; typing just leaves the first option
             focused.
 
-        What works: open the listbox, press ArrowDown until the wanted row
-        materialises, then click it.
+        What works: open the listbox, wheel-scroll the popup until the wanted
+        row materialises, then click it.
 
-        What does not, and cost the most time proving: every way of asking
-        "which option is highlighted?" lies here.  DOM focus never moves,
-        ``aria-activedescendant`` is null, and ``data-focus="true"`` sits on a
-        recycled node — so a walk driven by any of them appears to stall on the
-        9th option while the rendered window is demonstrably still advancing.
-        Hence: don't track the highlight, just watch for the target to appear.
+        Measured on the 51-state list, everything else falls short:
+          ArrowDown   advances the window one page then stops — reaches Florida
+                      (index 9) but never Ohio (35) or Wisconsin (49)
+          type-ahead  does nothing at all
+          PageDown    crawls a row or so per press
+          End         closes the popup
+          scrollTop   clamps: the container is only ~8px taller than its viewport
+
+        Nor is there any point tracking which option is highlighted: DOM focus
+        never moves, ``aria-activedescendant`` is null, and ``data-focus="true"``
+        sits on a recycled node, so all three report a stale answer while the
+        window is visibly advancing.  Watch for the target row instead.
         """
         try:
             base = page.locator(f'select[name="{name}"]').locator(
@@ -610,18 +629,22 @@ class FormFiller(BasePlatformFiller):
             trigger.click()          # real click — JS .click() will not open it
             page.wait_for_selector('[role="option"]', timeout=5000)
 
-            # Don't track which option is highlighted — the virtualiser recycles
-            # the option nodes, so data-focus/tabindex/activeElement all report a
-            # stale element and any walk based on them appears to stall after the
-            # first rendered window.  ArrowDown *does* advance the window, so
-            # simply step until the target row materialises, then click it.
-            budget = page.evaluate(
-                """(n) => {
-                    const s = document.querySelector('select[name="' + n + '"]');
-                    return s ? Array.from(s.options).filter(o => o.value !== '').length : 60;
-                }""", name) or 60
+            # Scroll the popup with the wheel until the wanted row materialises,
+            # then click it.  Wheel is the only navigation that reaches the whole
+            # collection: ArrowDown advances the window by one page and then
+            # stops (fine for Florida at index 9, useless for Wisconsin at 49),
+            # type-ahead does nothing, PageDown crawls, and End closes the popup.
             target = page.locator(f'[role="option"][data-key="{value}"]')
-            for _ in range(budget + 10):
+            box = None
+            try:
+                box = page.locator('[role="listbox"]').first.bounding_box(timeout=2000)
+            except Exception:
+                pass
+            if box:
+                page.mouse.move(box["x"] + box["width"] / 2,
+                                box["y"] + box["height"] / 2)
+
+            for _ in range(40):
                 if target.count():
                     target.first.scroll_into_view_if_needed(timeout=2000)
                     target.first.click()
@@ -633,8 +656,11 @@ class FormFiller(BasePlatformFiller):
                     ok = self._read_back(page, name) == value
                     log.info("form.listbox_select", field=name, value=value, ok=ok)
                     return ok
-                page.keyboard.press("ArrowDown")
-                time.sleep(0.12)
+                if box:
+                    page.mouse.wheel(0, 300)
+                else:                      # no popup geometry — fall back to keys
+                    page.keyboard.press("ArrowDown")
+                time.sleep(0.2)
 
             rendered = page.evaluate(
                 """() => Array.from(document.querySelectorAll('[role="option"]'))
