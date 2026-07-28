@@ -56,10 +56,7 @@ ALL_OFFERS: dict[str, dict] = {
         "color":         "#4ade80",
         "sheet_url_env": "SHEET_URL_MLW",
         "sheet_ws_env":  "SHEET_WS_MLW",
-        # Parked: the filler drives the live form correctly up to the bank step,
-        # but the final submit has never been exercised, so it is not fit to run
-        # unattended yet.  Re-enable once that last step is confirmed.
-        "enabled":       False,
+        "enabled":       True,
     },
     "roundsky": {
         "name":          "Round Sky (ping-post)",

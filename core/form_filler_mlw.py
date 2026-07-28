@@ -248,8 +248,15 @@ class FormFiller(BasePlatformFiller):
                             failed=res["failed"], row=row_number)
 
             self._action_pause()
-            self._click_next(page)
-            self._await_change(page, sig)
+            # Single-choice steps commit on selection and move on by themselves.
+            # Clicking Continue afterwards would land on the *next* step before
+            # it has been filled, tripping its validation for no reason — so
+            # only advance manually if we are still on the same step.
+            if self._signature(page) == sig:
+                self._click_next(page)
+                self._await_change(page, sig)
+            else:
+                log.info("form.step_self_advanced", step=step_num, row=row_number)
             self._live(page)
 
         raise FormFillerError(
@@ -443,6 +450,25 @@ class FormFiller(BasePlatformFiller):
             log.warning("form.value_mismatch", field=name, wanted=value[:20], got=got[:20])
         return ok
 
+    def _signature(self, page: Page) -> str:
+        """Identity of the step currently on screen."""
+        return ",".join(sorted(self._visible_field_names(page)))
+
+    def _present(self, page: Page, name: str) -> bool:
+        """Is the field still in the DOM?
+
+        Single-choice steps on this site commit as soon as a value is picked and
+        move to the next step immediately, taking the control with them.  A field
+        that has vanished right after being set was therefore set *successfully*
+        — treating its absence as a failed write is what made every debt-amount
+        step report `field_rejected` while the value had in fact gone through.
+        """
+        try:
+            return bool(page.evaluate(
+                """(n) => !!document.querySelector('[name="' + n + '"]')""", name))
+        except Exception:
+            return False
+
     def _read_back(self, page: Page, name: str) -> str:
         try:
             return page.evaluate(
@@ -517,6 +543,10 @@ class FormFiller(BasePlatformFiller):
         for kwargs in ({"value": value}, {"label": value}):
             try:
                 loc.select_option(timeout=6000, **kwargs)
+                time.sleep(0.35)
+                if not self._present(page, name):
+                    log.info("form.select_auto_advanced", field=name, value=value)
+                    return True
                 if self._read_back(page, name) == value:
                     return True
             except Exception:
@@ -534,6 +564,10 @@ class FormFiller(BasePlatformFiller):
                     sel.dispatchEvent(new Event('input',  { bubbles: true }));
                     sel.dispatchEvent(new Event('change', { bubbles: true }));
                 }""", [name, value])
+            time.sleep(0.35)
+            if not self._present(page, name):
+                log.info("form.select_auto_advanced", field=name, value=value)
+                return True
             if self._read_back(page, name) == value:
                 return True
         except Exception as e:
@@ -591,7 +625,11 @@ class FormFiller(BasePlatformFiller):
                 if target.count():
                     target.first.scroll_into_view_if_needed(timeout=2000)
                     target.first.click()
-                    time.sleep(0.4)
+                    time.sleep(0.45)
+                    if not self._present(page, name):
+                        log.info("form.listbox_select", field=name, value=value,
+                                 advanced=True)
+                        return True
                     ok = self._read_back(page, name) == value
                     log.info("form.listbox_select", field=name, value=value, ok=ok)
                     return ok
