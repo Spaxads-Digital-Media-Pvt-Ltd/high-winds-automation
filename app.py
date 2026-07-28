@@ -1,5 +1,5 @@
 """
-app.py — Multi-Site Lead Automation Web UI
+app.py — Multi-Site Lead Automation Web UI Test
 ──────────────────────────────────────────
 Run multiple offers simultaneously. Each offer has its own engine thread,
 log queue, stats, screenshot directory, and stop event.
