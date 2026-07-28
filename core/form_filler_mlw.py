@@ -14,14 +14,18 @@ DOM contract, captured by walking the live form (devtools/mlw_steps.json):
   * The <form> id is regenerated per render (e.g. ``tf---fcg23sw``), so it
     cannot be an anchor.  Scope instead to whichever element carries a
     platform-named field.
-  * Every choice except step 0 is a real ``<input type=radio name=X value=Y>``
-    group or a native ``<select>``, both carrying the platform's own value —
-    identical values to AEF (tenure 60/48/36/24/12, yes/no 1/0, payfreq 1-4,
-    …).  Selection is therefore **by value**, and the visible wording does not
-    matter.  Only step 0's loan amount is button chips with no value attribute,
-    which is the single case that needs label matching.
-  * The radios carry no ``id``, so ``label[for=…]`` finds nothing; the click
-    target is the input's wrapping <label>.
+  * Choices come in two shapes, both carrying the platform's own value
+    (identical values to AEF: tenure 60/48/36/24/12, yes/no 1/0, payfreq 1-4, …):
+      - radio groups (tenure, yes/no, pay freq, credit, reason, account type),
+        set by value; the radios carry no ``id`` so the click target is the
+        wrapping <label>.
+      - HeroUI <Select>s (hstate, licst, i_ad_ccDebtAmt, netim) — the element
+        with the ``name`` is a hidden a11y mirror; ``select_option`` on it does
+        NOT drive the component and, on the auto-advancing debt/income selects,
+        made it commit a garbage first-character value.  These MUST be driven
+        through their listbox (open trigger, click the option).  See _select.
+    Only step 0's loan amount is button chips with no value attribute, the one
+    case that needs label matching.
   * react-hook-form ignores a plain value assignment: setting a text field
     requires real typing, or a native-setter write followed by
     input/change/blur, which is what ``_text`` does.
@@ -532,17 +536,38 @@ class FormFiller(BasePlatformFiller):
             log.warning("form.radio_failed", field=name, value=value, error=str(e)[:80])
             return False
 
+    def _is_heroui_select(self, page: Page, name: str) -> bool:
+        """True when the field's <select> is a HeroUI Select's hidden a11y mirror
+        rather than a plain native control.  The mirror lives inside a
+        ``[data-testid="hidden-select-container"]`` and its ``[data-slot="base"]``
+        container carries a listbox trigger button — that button, not the mirror,
+        owns the React value."""
+        try:
+            return bool(page.evaluate(
+                """(n) => {
+                    const sel = document.querySelector('select[name="' + n + '"]');
+                    if (!sel) return false;
+                    if (sel.closest('[data-testid="hidden-select-container"]')) return true;
+                    const base = sel.closest('[data-slot="base"]');
+                    return !!(base && base.querySelector(
+                        '[aria-haspopup="listbox"],button[data-slot="trigger"]'));
+                }""", name))
+        except Exception:
+            return False
+
     def _select(self, page: Page, name: str, value: str) -> bool:
         """Set a <select>-backed field, verifying the value actually stuck.
 
-        Some of these are plain native selects.  Others are HeroUI <Select>
-        components, where the element carrying the ``name`` is a *visually
-        hidden a11y mirror* (``data-testid="hidden-select-container"``, clipped
-        to 1px) and the real control is a custom listbox that owns the React
-        state.  Writing the mirror leaves the component untouched: the field
-        reads back empty and the step refuses to advance with "… is required",
-        while select_option() reports success.  Hence the read-back check —
-        never trust the write — and the listbox fallback below.
+        Every <select> on this site is a HeroUI <Select> — the element carrying
+        the ``name`` is a visually-hidden a11y mirror, and the real control is a
+        custom listbox that owns the React state.  ``select_option()`` on the
+        mirror does NOT update that state: for hstate/licst it read back empty,
+        and for the auto-advancing debt/income selects it was worse — HeroUI
+        committed a garbage first-character value ("9999" -> "9", "4000" -> "4")
+        and advanced the step before it could be corrected, so the lead was
+        submitted with an invalid income bracket and the server bounced it
+        (missingFields:[netim] -> page reload -> wizard restart).  So HeroUI
+        selects go straight to the listbox and never touch the mirror.
         """
         try:
             present = bool(page.evaluate(
@@ -552,6 +577,11 @@ class FormFiller(BasePlatformFiller):
         if not present:
             return False
 
+        if self._is_heroui_select(page, name):
+            return self._select_listbox(page, name, value)
+
+        # Genuinely plain native select (none observed on this site, but keep a
+        # correct path in case a step ever renders one).
         loc = page.locator(f'select[name="{name}"]').first
         for kwargs in ({"value": value}, {"label": value}):
             try:
@@ -565,7 +595,6 @@ class FormFiller(BasePlatformFiller):
             except Exception:
                 pass
 
-        # Native setter + events: React ignores a plain `.value =` assignment.
         try:
             page.evaluate(
                 """([n, v]) => {
