@@ -312,7 +312,12 @@ class BasePlatformFiller:
             full_ssn = last4
 
         zip_raw = _digits(g("ZIP Code", "Zip", "Zip_Code"))
+        # ABA routing numbers are 9 digits; a spreadsheet that stored the value
+        # as a number drops the leading zero (067014822 -> 67014822), which then
+        # fails the checksum. Restore it before validating.
         routing = _digits(g("ABA Routing Number", "routingNumber", "Routing Number"))
+        if 0 < len(routing) < 9:
+            routing = routing.zfill(9)
 
         loan_raw = re.sub(r"[,$\s]", "", g("Requested Loan Amount ($)", "Loan_Amount"))
         try:

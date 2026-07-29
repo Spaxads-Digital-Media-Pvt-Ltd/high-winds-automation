@@ -142,6 +142,14 @@ class FormFiller(BasePlatformFiller):
                 log.info("form.completed", step=step_num, outcome=done, row=row_number)
                 return done
 
+            # A returning applicant is met with a condensed "Loan request
+            # verified — we've located your file" screen: no questions, just a
+            # Request Loan button (#returnSubmit) that resubmits the stored
+            # application.  Handle it wherever it appears.
+            if self._maybe_returning_applicant(page, row_number):
+                time.sleep(2)
+                continue
+
             names = self._visible_field_names(page)
             if not names:
                 # Between renders, or a non-field interstitial — give it a beat.
@@ -162,6 +170,16 @@ class FormFiller(BasePlatformFiller):
             log.info("form.step", step=step_num, fields=sig[:70], row=row_number)
             self._live(page)
             self._read_pause()          # human beat: read the step before filling
+
+            # The read beat can let a returning-applicant screen swap the fields
+            # out from under us (the site recognises the file mid-flow). If
+            # everything we were about to fill has vanished, deal with that
+            # screen instead of typing into a field that is gone (this is the
+            # email-step failure on returning leads).
+            if not any(self._present(page, n) for n in names):
+                self._maybe_returning_applicant(page, row_number)
+                time.sleep(1.5)
+                continue
 
             res = self._handle_step(page, names, f)
             if not res["known"]:
@@ -459,6 +477,52 @@ class FormFiller(BasePlatformFiller):
             ) or ""
         except Exception:
             return ""
+
+    def _present(self, page: Page, name: str) -> bool:
+        """Is the field still in the DOM?  A field that vanished right after
+        detection means the step re-rendered (returning-applicant screen)."""
+        try:
+            return bool(page.evaluate(
+                """(n) => !!document.querySelector('[name="' + n + '"]')""", name))
+        except Exception:
+            return False
+
+    def _maybe_returning_applicant(self, page: Page, row_number: int) -> bool:
+        """If the current screen is AEF's returning-applicant page ("Loan
+        request verified — we've located your file…"), click its Request Loan
+        button (#returnSubmit) to resubmit the stored application and return
+        True.  Returns False on any normal step.
+
+        Only returning identities see this; a fresh lead never does.  Left
+        unhandled it looks like the email step losing its fields mid-render."""
+        try:
+            clicked = page.evaluate(
+                r"""() => {
+                    const vis = e => e && e.offsetParent !== null && e.getClientRects().length > 0;
+                    const body = document.body ? document.body.innerText : '';
+                    const returning = /located your file|loan request verified|review your new loan|welcome back/i.test(body);
+                    if (!returning) return '';
+                    let b = document.getElementById('returnSubmit');
+                    if (!(b && vis(b))) {
+                        const re = /^(request loan|view.*offers?|see.*offers?|submit)/i;
+                        b = Array.from(document.querySelectorAll(
+                            'button,[role=button],a,input[type=submit]'))
+                            .filter(vis).filter(e => !e.disabled)
+                            .find(e => re.test((e.innerText || e.value || '').replace(/\s+/g, ' ').trim()));
+                    }
+                    if (b && vis(b)) {
+                        b.click();
+                        return (b.innerText || b.value || 'Request Loan').replace(/\s+/g, ' ').trim().slice(0, 40);
+                    }
+                    return '';
+                }"""
+            )
+        except Exception:
+            clicked = None
+        if clicked:
+            log.info("form.returning_applicant", action=clicked, row=row_number)
+            return True
+        return False
 
     def _completion_state(self, page: Page) -> str:
         """Non-empty once the application has been submitted and routed."""
