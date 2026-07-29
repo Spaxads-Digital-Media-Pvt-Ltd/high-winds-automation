@@ -126,21 +126,35 @@ def _apply_proxy_env(proxy: dict) -> None:
         Path("proxies.txt").write_text(proxy["file_text"])
 
 
+_BROWSER_CHANNELS = ("chrome", "chromium", "msedge", "chrome-beta")
+
+
 def _current_browser_config() -> dict:
-    """Live browser settings (engine reads these from the environment)."""
+    """Live browser settings.  ``channel`` is the default applied to any offer
+    without its own choice; ``per_offer`` maps offer_id -> channel."""
+    saved = _load_ui_config().get("browser") or {}
+    default = (saved.get("channel") or os.getenv("BROWSER_CHANNEL", "chrome")).strip().lower() or "chrome"
+    per = {oid: c for oid, c in (saved.get("per_offer") or {}).items()
+           if oid in OFFERS and c in _BROWSER_CHANNELS}
     return {
-        "channel":  os.getenv("BROWSER_CHANNEL", "chrome").strip().lower() or "chrome",
-        "headless": os.getenv("HEADLESS", "true").strip().lower() != "false",
+        "channel":   default,
+        "headless":  saved.get("headless", os.getenv("HEADLESS", "true").strip().lower() != "false"),
+        "per_offer": per,
     }
 
 
-def _apply_browser_env(browser: dict) -> None:
-    """Push browser settings into the environment for the next engine start.
+def _offer_channel(offer_id: str) -> str:
+    """Browser channel to launch for one offer: its own choice, else the
+    default.  Chrome is the safe default (bundled Chromium crashes on some
+    offers' fraud-detection scripts)."""
+    b = _current_browser_config()
+    return (b["per_offer"].get(offer_id) or b["channel"] or "chrome")
 
-    Channel matters on this target: Playwright's bundled Chromium crashes its
-    renderer on the offer's fraud-detection script, while a stock Google Chrome
-    install loads the same page cleanly.  'chrome' is therefore the default.
-    """
+
+def _apply_browser_env(browser: dict) -> None:
+    """Push the *default* channel + headless into the environment.  Per-offer
+    channels are passed through each engine's own config dict instead (so
+    concurrent engines never race on this shared var)."""
     channel = (browser.get("channel") or "chrome").strip().lower()
     os.environ["BROWSER_CHANNEL"] = channel
     headless = browser.get("headless")
@@ -395,7 +409,10 @@ def _run_engine(offer_id: str, target_url: str) -> None:
     # watching a run locally; it cannot be used on a headless server without a
     # virtual display.
     _apply_browser_env(_load_ui_config().get("browser") or _current_browser_config())
-    _log(offer_id, f"INFO  Browser: {os.getenv('BROWSER_CHANNEL', 'chrome')} "
+    # Resolve THIS offer's channel and carry it in the engine's config dict so
+    # concurrent engines can each use a different browser.
+    _offer_ch = _offer_channel(offer_id)
+    _log(offer_id, f"INFO  Browser: {_offer_ch} "
                    f"({'headless' if os.getenv('HEADLESS', 'true') != 'false' else 'headed'})")
 
     try:
@@ -431,6 +448,7 @@ def _run_engine(offer_id: str, target_url: str) -> None:
             config = yaml.safe_load(fh)
 
         config["target"]["url"] = target_url
+        config["browser"] = {"channel": _offer_ch}   # per-offer browser channel
         ss_dir = f"screenshots/{offer_id}"
         config.setdefault("screenshots", {})["directory"] = ss_dir
         Path(ss_dir).mkdir(parents=True, exist_ok=True)
@@ -1162,20 +1180,17 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
 
     <div class="tab-body" id="body-browser" style="display:none">
       <div class="src-block">
-        <label class="fld-lbl">Browser Engine</label>
-        <select id="br-channel" class="inp">
-          <option value="chrome">Google Chrome &mdash; recommended</option>
-          <option value="chromium">Chromium (Playwright bundled)</option>
-          <option value="msedge">Microsoft Edge</option>
-        </select>
-        <div class="hint">
-          Playwright's bundled Chromium crashes on this offer's fraud-detection
-          script, headless and headed alike. Stock Google Chrome loads the same
-          page cleanly &mdash; keep this on <b>chrome</b> unless you are testing.
+        <label class="fld-lbl">Browser per offer</label>
+        <div class="hint" style="margin-bottom:8px">
+          Choose the browser each offer opens in. Playwright's bundled
+          <b>Chromium</b> crashes on some offers' fraud-detection scripts
+          (American Emergency Fund, MyLendingWallet); stock <b>Google Chrome</b>
+          loads them cleanly. Low Credit Finance works on either.
         </div>
+        <div id="br-offer-list"></div>
       </div>
       <div class="src-block">
-        <label class="fld-lbl">Window Mode</label>
+        <label class="fld-lbl">Window Mode (all offers)</label>
         <select id="br-headless" class="inp">
           <option value="true">Headless &mdash; no window (required on a server)</option>
           <option value="false">Headed &mdash; show the browser window</option>
@@ -1186,7 +1201,6 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
         </div>
       </div>
       <div class="btn-row">
-        <button class="m-btn ghost" onclick="testBrowser()">Test Against Offer</button>
         <button class="m-btn primary" onclick="saveBrowser()">Save &amp; Apply</button>
       </div>
       <div class="result" id="br-result"></div>
@@ -1510,9 +1524,26 @@ async function loadConfig() {
   onSourceChange();
 
   const b = CONFIG.browser || {};
-  document.getElementById('br-channel').value  = b.channel || 'chrome';
+  const per = b.per_offer || {};
+  const def = b.channel || 'chrome';
   document.getElementById('br-headless').value = (b.headless === false) ? 'false' : 'true';
   document.getElementById('br-result').textContent = '';
+  const CHANNELS = [['chrome','Google Chrome'],['chromium','Chromium (bundled)'],['msedge','Microsoft Edge']];
+  const bl = document.getElementById('br-offer-list');
+  bl.innerHTML = '';
+  Object.keys(CONFIG.offers).forEach(oid => {
+    const cur = per[oid] || def;
+    const opts = CHANNELS.map(c => '<option value="' + c[0] + '"' + (c[0]===cur?' selected':'') + '>' + c[1] + '</option>').join('');
+    const row = document.createElement('div');
+    row.className = 'url-card';
+    row.innerHTML =
+      '<div class="url-card-head"><span class="url-name">' + CONFIG.offers[oid] + '</span></div>' +
+      '<div style="display:flex;gap:8px;align-items:center;margin-top:6px">' +
+        '<select class="inp br-off" data-oid="' + oid + '" style="flex:1">' + opts + '</select>' +
+        '<button class="m-btn ghost" style="white-space:nowrap" onclick="testBrowser(\'' + oid + '\')">Test</button>' +
+      '</div>';
+    bl.appendChild(row);
+  });
 
   const wrap = document.getElementById('url-cards');
   wrap.innerHTML = '';
@@ -1593,32 +1624,37 @@ async function saveProxy() {
   else      { r.className = 'result err-res'; r.textContent = '❌ ' + (d.msg || 'save failed'); }
 }
 
-async function testBrowser() {
+function collectPerOffer() {
+  const per = {};
+  document.querySelectorAll('.br-off').forEach(s => per[s.dataset.oid] = s.value);
+  return per;
+}
+
+async function testBrowser(oid) {
   const r = document.getElementById('br-result');
-  r.className = 'result'; r.textContent = 'Launching browser and loading the offer… (up to 30s)';
-  const body = {
-    channel:  document.getElementById('br-channel').value,
-    headless: document.getElementById('br-headless').value === 'true',
-  };
+  const sel = document.querySelector('.br-off[data-oid="' + oid + '"]');
+  const channel = sel ? sel.value : 'chrome';
+  const name = (CONFIG && CONFIG.offers && CONFIG.offers[oid]) || oid;
+  r.className = 'result'; r.textContent = 'Testing ' + name + ' with ' + channel + '… (up to 30s)';
   const d = await fetch('/api/browser/test', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify({ channel, offer_id: oid, headless: document.getElementById('br-headless').value === 'true' })
   }).then(r => r.json()).catch(() => ({ success: false, error: 'network error' }));
-  if (d.success) { r.className = 'result ok-res';  r.textContent = '✅ ' + d.msg; }
-  else           { r.className = 'result err-res'; r.textContent = '❌ ' + (d.error || 'failed'); }
+  if (d.success) { r.className = 'result ok-res';  r.textContent = '✅ ' + name + ': ' + d.msg; }
+  else           { r.className = 'result err-res'; r.textContent = '❌ ' + name + ': ' + (d.error || 'failed'); }
 }
 
 async function saveBrowser() {
   const body = {
-    channel:  document.getElementById('br-channel').value,
-    headless: document.getElementById('br-headless').value === 'true',
+    per_offer: collectPerOffer(),
+    headless:  document.getElementById('br-headless').value === 'true',
   };
   const d = await fetch('/api/config/browser', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   }).then(r => r.json()).catch(() => ({ ok: false }));
   const r = document.getElementById('br-result');
-  if (d.ok) { r.className = 'result ok-res';  r.textContent = '✅ Browser settings saved — applies on next Start'; }
+  if (d.ok) { r.className = 'result ok-res';  r.textContent = '✅ Per-offer browser saved — applies on next Start'; }
   else      { r.className = 'result err-res'; r.textContent = '❌ ' + (d.msg || 'save failed'); }
 }
 
@@ -2080,10 +2116,21 @@ def api_config():
 @app.route("/api/config/browser", methods=["POST"])
 def api_config_browser():
     data = request.get_json(silent=True) or {}
-    channel = (data.get("channel") or "chrome").strip().lower()
-    if channel not in ("chrome", "chromium", "msedge", "chrome-beta"):
-        return jsonify({"ok": False, "msg": f"Unsupported browser channel: {channel}"})
-    browser = {"channel": channel, "headless": bool(data.get("headless", True))}
+    # Per-offer channels (offer_id -> channel); anything unknown/invalid is
+    # dropped so a bad value can never be persisted.
+    per_offer = {
+        oid: c.strip().lower()
+        for oid, c in (data.get("per_offer") or {}).items()
+        if oid in OFFERS and str(c).strip().lower() in _BROWSER_CHANNELS
+    }
+    default = (data.get("channel") or "chrome").strip().lower()
+    if default not in _BROWSER_CHANNELS:
+        default = "chrome"
+    browser = {
+        "channel":   default,
+        "headless":  bool(data.get("headless", True)),
+        "per_offer": per_offer,
+    }
     _apply_browser_env(browser)
     cfg = _load_ui_config()
     cfg["browser"] = browser
@@ -2148,7 +2195,9 @@ def api_browser_test():
     data = request.get_json(silent=True) or {}
     channel = (data.get("channel") or "chrome").strip().lower()
     headless = bool(data.get("headless", True))
-    url = next(iter(OFFERS.values()))["url"]
+    # Test the specific offer's URL when given, else the first offer's.
+    oid = data.get("offer_id")
+    url = OFFERS[oid]["url"] if oid in OFFERS else next(iter(OFFERS.values()))["url"]
 
     proc = subprocess.Popen(
         [sys.executable, "-c", _BROWSER_PROBE, channel, "1" if headless else "0", url],

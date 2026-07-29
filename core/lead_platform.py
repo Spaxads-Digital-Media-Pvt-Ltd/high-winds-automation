@@ -143,7 +143,11 @@ class BasePlatformFiller:
             # Chrome install runs the identical page without trouble, so we
             # launch that channel by default.  BROWSER_CHANNEL=chromium forces
             # the bundled build (expect crashes).
-            channel = os.getenv("BROWSER_CHANNEL", "chrome").strip().lower()
+            # Per-offer channel comes from the engine's own config dict (so
+            # concurrent engines can use different browsers without racing on a
+            # shared env var); fall back to BROWSER_CHANNEL, then "chrome".
+            channel = (self._config.get("browser", {}).get("channel")
+                       or os.getenv("BROWSER_CHANNEL", "chrome")).strip().lower()
             if channel and channel not in ("chromium", "bundled", "default"):
                 launch_args["channel"] = channel
             if proxy_url:

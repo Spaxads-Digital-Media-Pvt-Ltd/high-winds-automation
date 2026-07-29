@@ -112,8 +112,10 @@ class FormFiller:
 
         with sync_playwright() as pw:
             launch_args: dict[str, Any] = {"headless": headless}
-            channel = os.getenv("BROWSER_CHANNEL", "").strip()
-            if channel:
+            # Per-offer channel from the engine's config dict, else the env var.
+            channel = (self._config.get("browser", {}).get("channel")
+                       or os.getenv("BROWSER_CHANNEL", "")).strip().lower()
+            if channel and channel not in ("chromium", "bundled", "default"):
                 launch_args["channel"] = channel
             if proxy_url:
                 launch_args["proxy"] = ProxyManager.to_playwright_proxy(proxy_url)

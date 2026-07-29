@@ -5,13 +5,18 @@
     "low_credit": "https://lowcreditfinance.com/"
   },
   "proxy": {
-    "source": "none",
-    "rotating_url": "http://tFxQm6EDdVq1B4d3:mobile;us;;;@proxy.froxy.com:9000",
+    "source": "rotating",
+    "rotating_url": "http://zeeshan_aliak0_gmail_com:Leodigital0990-country-US@la.residential.rayobyte.com:8000",
     "env_list": "http://user:pass@proxy1.example.com:8080,socks5://user:pass@proxy2.example.com:1080"
   },
   "scheduled_jobs": [],
   "browser": {
     "channel": "chrome",
-    "headless": true
+    "headless": true,
+    "per_offer": {
+      "american_emergency_fund": "chrome",
+      "my_lending_wallet": "chrome",
+      "low_credit": "chrome"
+    }
   }
 }
