@@ -15,8 +15,8 @@
     "headless": true,
     "per_offer": {
       "american_emergency_fund": "chrome",
-      "my_lending_wallet": "chrome",
-      "low_credit": "chrome"
+      "low_credit": "chromium",
+      "my_lending_wallet": "chrome"
     }
   }
 }
