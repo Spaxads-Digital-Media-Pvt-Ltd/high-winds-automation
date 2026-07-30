@@ -3,13 +3,14 @@
 Reads leads from Google Sheets, rotates proxy + device fingerprint per attempt,
 fills a loan application via Playwright, and writes the result back to the sheet.
 
-Three offers:
+Four offers:
 
 | Offer | Front-end | Sheet tab | Filler |
 |-------|-----------|-----------|--------|
-| American Emergency Fund | server-rendered Bootstrap wizard | `Sheet1` | `form_filler_aef` (shared platform) |
-| MyLendingWallet | React SPA (react-hook-form) | `Sheet2` | `form_filler_mlw` (shared platform) |
-| Low Credit Finance | iframe.global multi-step form | `Sheet3` | `form_filler_lowcredit` (standalone) |
+| American Emergency Fund | server-rendered Bootstrap wizard | `American Emergency Fund` | `form_filler_aef` (shared platform) |
+| MyLendingWallet | React SPA (react-hook-form) | `MyLendingWallet` | `form_filler_mlw` (shared platform) |
+| Low Credit Finance | iframe.global multi-step form | `Low Credit Finance` | `form_filler_lowcredit` (standalone) |
+| CashUSA | Round Sky Vue "SmartForm" | `CashUSA` | `form_filler_cashusa` (standalone) |
 
 Each offer carries an `enabled` flag in `ALL_OFFERS` ([app.py](app.py)); setting
 it to `False` takes an offer out of the UI without deleting anything.
@@ -17,10 +18,41 @@ it to `False` takes an offer out of the UI without deleting anything.
 AEF and MyLendingWallet run the same backend lead platform, so
 `core/lead_platform.py` holds everything they share — the 31-field vocabulary,
 sheet parsing, value mapping and validation, and the browser lifecycle — and
-each filler subclasses it with only its own DOM layer. Low Credit Finance is a
-different platform (an `iframe.global` embedded funnel), so its filler is
-standalone; it is interface-compatible with the engine (same
+each filler subclasses it with only its own DOM layer. Low Credit Finance and
+CashUSA are different platforms, so their fillers are standalone; both are
+interface-compatible with the engine (same
 `FormFiller`/`FormFillerError`/`process_row` contract).
+
+**CashUSA** (`form_filler_cashusa.py`) drives the `/get-started` → **Skip
+lookup** path, which bypasses the identity-verification lookup and goes straight
+to the full manual form. It is a single long one-question-per-screen wizard,
+dispatched by reading each screen's visible controls / question text and
+answering from the lead:
+
+- **Text/select steps** — name, DOB, loan reason, amount, address, contact,
+  length-at-address, income source, time employed, pay frequency, monthly
+  income, employer (name/phone/title), driver's license (+ state), SSN, bank
+  ABA + account number, credit rating, unsecured-debt range.
+- **Duet date picker** — `nextPayday` (month/year selects + day grid). Missing
+  "Next Payday" in the sheet auto-computes to ~2 weeks out.
+- **Yes/No & choice screens** — own-home, military, account type
+  (Checking/Savings), direct-deposit vs paper check, and the "own a paid-off
+  car?" title-loan upsell (answered **No**). Detection tolerates descriptive
+  labels ("No, I don't").
+
+Two CashUSA specifics worth knowing:
+
+- **Employer phone must differ from the applicant's phone**, or the SmartForm
+  rejects it ("INVALID EMPLOYER PHONE"). The parser uses the lead's
+  `Employer Work Phone` when present and distinct; otherwise it derives a
+  distinct, valid US number from the applicant's so the required field passes.
+- **Runs on the `chrome` channel** (the default), like AEF/MyLendingWallet.
+
+Sheet-column reconciliation (the shared 42-column layout uses slightly different
+names than CashUSA's fields): `Credit Score Rating` → credit rating,
+`Years at Bank` → months-at-bank (×12), `Credit Card Debt` → unsecured-debt.
+`Job Title` isn't in the layout, so it defaults to "Employee"; add a
+`Job Title` column if you want real values.
 
 ---
 
@@ -198,6 +230,46 @@ an unrecognised field, `field_rejected` for a label it cannot find.
 
 ---
 
+## ✅ Validating the CashUSA filler
+
+**Verified against the live form, end to end**, via the `/get-started` → Skip
+lookup path with fake test data (John Sample, fabricated SSN/bank). Every screen
+maps and advances, in this order:
+
+> name → DOB → loan reason → amount → address → contact (email/phone) →
+> length-at-address → own-home (Y/N) → income source → time employed →
+> pay frequency → military (Y/N) → monthly income → **next payday (Duet picker)**
+> → employer (name/phone/title) → driver's licence + state → SSN →
+> account type (Checking/Savings) → direct-deposit vs paper-check →
+> months-at-bank → **bank ABA + account number** → credit rating →
+> unsecured debt → own-a-paid-off-car (Y/N) → **offers/results page**.
+
+Bugs found and fixed while walking it:
+
+* **Employer phone equal to the applicant's is rejected** ("INVALID EMPLOYER
+  PHONE") — the field stayed invalid and Continue stayed disabled, stalling the
+  run. Fixed by deriving a distinct valid number when the lead has no separate
+  employer phone (see above).
+* **Human-pacing pause before Continue trapped a step** — a masked-phone async
+  re-validation ~1s after blur briefly disables Continue, so the loop now clicks
+  Continue promptly and takes its human beat *after* advancing.
+* **Non-Yes/No choice screens and descriptive Yes/No labels** ("Checking" /
+  "Savings", "No, I don't") weren't handled — now dispatched by matching the
+  lead value / answer-word prefix.
+
+⚠️ **A full run submits.** CashUSA's final qualifier ("own a paid-off car?")
+**auto-advances on click straight to the offers/results page** — there is no
+separate consent+submit button to stop at. So any complete pass delivers the
+lead to the live Round Sky backend. This is correct for production (real leads),
+but it means the filler must never be run to completion with fake data; validate
+by stopping before the final qualifier.
+
+The filler fails loudly on a gap: `unhandled_step` for an unrecognised
+screen, `stuck` if a step won't advance, and it logs `form.unmapped_field` /
+`form.select_no_option` (with the available options) for any field it can't map.
+
+---
+
 ## ⚠️ Browser Engine: use Google Chrome, not bundled Chromium
 
 **Playwright's bundled Chromium crashes its renderer on this site** part-way
@@ -289,6 +361,9 @@ values and all 23 steps against `mlw/`, with statuses written back to Sheet2.
 | `GOOGLE_SHEET_URL` | — | Sheet URL or ID |
 | `GOOGLE_SHEET_WORKSHEET` | `Sheet1` | Tab name |
 | `SHEET_URL_AEF` / `SHEET_WS_AEF` | — | Per-offer override; blank falls back to the two above |
+| `SHEET_URL_MLW` / `SHEET_WS_MLW` | — | MyLendingWallet per-offer sheet override |
+| `SHEET_URL_LOW_CREDIT` / `SHEET_WS_LOW_CREDIT` | — | Low Credit Finance per-offer sheet override |
+| `SHEET_URL_CASHUSA` / `SHEET_WS_CASHUSA` | — | CashUSA per-offer sheet override |
 | `BROWSER_CHANNEL` | `chrome` | `chrome` \| `chromium` \| `msedge`. Bundled `chromium` crashes on this target |
 | `PROXY_SOURCE` | `file` | `file`, `env`, `rotating`, or `none` |
 | `PROXY_LIST` | — | Comma-separated proxies (source=env) |

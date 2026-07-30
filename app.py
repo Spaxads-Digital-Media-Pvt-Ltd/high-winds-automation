@@ -67,6 +67,15 @@ ALL_OFFERS: dict[str, dict] = {
         "sheet_ws_env":  "SHEET_WS_LOW_CREDIT",
         "enabled":       True,
     },
+    "cashusa": {
+        "name":          "CashUSA",
+        "url":           "https://www.cashusa.com/get-started",
+        "filler":        "core.form_filler_cashusa",
+        "color":         "#fbbf24",
+        "sheet_url_env": "SHEET_URL_CASHUSA",
+        "sheet_ws_env":  "SHEET_WS_CASHUSA",
+        "enabled":       True,
+    },
 }
 
 # What the UI, the engines and the scheduler actually see.  Disabled offers are

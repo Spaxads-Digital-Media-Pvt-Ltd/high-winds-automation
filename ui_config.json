@@ -2,7 +2,8 @@
   "urls": {
     "american_emergency_fund": "https://www.americanemergencyfund.com/",
     "my_lending_wallet": "https://www.mylendingwallet.com/",
-    "low_credit": "https://lowcreditfinance.com/"
+    "low_credit": "https://lowcreditfinance.com/",
+    "cashusa": "https://www.cashusa.com/get-started"
   },
   "proxy": {
     "source": "rotating",
@@ -15,6 +16,7 @@
     "headless": true,
     "per_offer": {
       "american_emergency_fund": "chrome",
+      "cashusa": "chromium",
       "low_credit": "chromium",
       "my_lending_wallet": "chrome"
     }
