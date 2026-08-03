@@ -13,6 +13,7 @@ import json
 import os
 import queue
 import socket
+import subprocess
 import threading
 import time
 import traceback
@@ -399,6 +400,26 @@ def _setup_structlog() -> None:
 
 # ── Engine runner ─────────────────────────────────────────────────────────────
 
+def _browser_tag(offer_id: str) -> str:
+    """Command-line marker stamped onto this offer's browser so a Stop can find
+    and kill it even while it is blocked mid-call."""
+    return f"lead-engine-tag={offer_id}"
+
+
+def _kill_browser(offer_id: str) -> None:
+    """Force-kill any browser this offer launched.  A browser blocked inside a
+    Playwright call (navigation, a wait on a page that never renders) never
+    reaches a cooperative stop-check, so Stop has to interrupt it at the OS
+    level: killing the process makes the in-flight Playwright call raise at once.
+    Matched by the per-offer marker flag, so it never touches another offer's
+    browser."""
+    try:
+        subprocess.run(["pkill", "-9", "-f", _browser_tag(offer_id)],
+                       capture_output=True, timeout=10)
+    except Exception as e:
+        _log(offer_id, f"WARN  Browser force-kill failed: {type(e).__name__}: {e}")
+
+
 def _run_engine(offer_id: str, target_url: str) -> None:
     eng = _engines[offer_id]
     stop_event = eng["stop_event"]
@@ -457,7 +478,9 @@ def _run_engine(offer_id: str, target_url: str) -> None:
             config = yaml.safe_load(fh)
 
         config["target"]["url"] = target_url
-        config["browser"] = {"channel": _offer_ch}   # per-offer browser channel
+        # Per-offer browser channel + a marker flag so Stop can force-kill this
+        # offer's browser (and only this one) if it blocks mid-call.
+        config["browser"] = {"channel": _offer_ch, "engine_tag": offer_id}
         ss_dir = f"screenshots/{offer_id}"
         config.setdefault("screenshots", {})["directory"] = ss_dir
         Path(ss_dir).mkdir(parents=True, exist_ok=True)
@@ -545,10 +568,13 @@ def _run_engine(offer_id: str, target_url: str) -> None:
                 proxy_display = proxy_url or "direct"
                 proxy_type    = ProxyManager.proxy_type(proxy_url)
                 proxy_ip      = _get_outbound_ip(proxy_url)
+                device_desc  = (f"{fingerprint.get('_os', '?')}/"
+                                f"{fingerprint.get('_browser', '?')} "
+                                f"{fingerprint.get('_model', '?')}")
 
                 _log(offer_id,
                      f"INFO  Row {row_num} attempt {attempt+1}/{max_retries+1} | "
-                     f"proxy: {proxy_type} ({proxy_ip}) | carrier: {carrier}")
+                     f"device: {device_desc} | proxy: {proxy_type} ({proxy_ip}) | carrier: {carrier}")
 
                 try:
                     result = form_filler.process_row(
@@ -570,7 +596,11 @@ def _run_engine(offer_id: str, target_url: str) -> None:
                     _log(offer_id, f"OK    Row {row_num} -> Success")
 
                 except FormFillerError as e:
-                    if e.error_type == "stopped":
+                    # A Stop mid-attempt force-kills the browser, so process_row
+                    # can surface as any error type (browser_closed / timeout /
+                    # unknown).  Treat *any* failure while stopping as a clean
+                    # Stop — never retry or mark Failed.
+                    if e.error_type == "stopped" or stop_event.is_set():
                         sheet.update_row(row_num, status="Stopped",
                                          notes="[stopped] Run stopped by user",
                                          proxy_used=proxy_display, ip=proxy_ip,
@@ -630,6 +660,13 @@ def _run_engine(offer_id: str, target_url: str) -> None:
                             time.sleep(1)
 
                 except Exception as e:
+                    if stop_event.is_set():
+                        sheet.update_row(row_num, status="Stopped",
+                                         notes="[stopped] Run stopped by user",
+                                         proxy_used=proxy_display, ip=proxy_ip,
+                                         retry_count=retry_count + attempt)
+                        _log(offer_id, f"INFO  Row {row_num} -> Stopped")
+                        break
                     sheet.update_row(row_num, status="Failed",
                                      notes=f"[unexpected] {e}",
                                      proxy_used=proxy_display, ip=proxy_ip,
@@ -2059,8 +2096,11 @@ def start(offer_id: str):
 def stop(offer_id: str):
     if offer_id not in _engines:
         return jsonify({"ok": False, "msg": "Unknown offer"})
-    _engines[offer_id]["stop_event"].set()
-    _log(offer_id, "INFO  Stop requested -- will halt after the current form step...")
+    eng = _engines[offer_id]
+    eng["stop_event"].set()      # break every wait loop + cooperative checks
+    eng["skip_wait"].set()       # jump out of any batch/pacer wait right away
+    _kill_browser(offer_id)      # interrupt a browser blocked mid-call
+    _log(offer_id, "INFO  Stop requested -- halting now.")
     return jsonify({"ok": True})
 
 
@@ -2348,6 +2388,8 @@ def api_cancel_job(job_id: str):
         else:
             for oid in job["offers"]:
                 _engines[oid]["stop_event"].set()
+                _engines[oid]["skip_wait"].set()
+                _kill_browser(oid)
             job["status"] = "cancelled"
         _persist_jobs()
     return jsonify({"ok": True})

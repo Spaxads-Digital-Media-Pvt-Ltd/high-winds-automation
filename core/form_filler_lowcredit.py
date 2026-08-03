@@ -111,7 +111,11 @@ class FormFiller:
         self._validate_required_fields(fields)
 
         with sync_playwright() as pw:
-            launch_args: dict[str, Any] = {"headless": headless}
+            launch_args: dict[str, Any] = {"headless": headless, "args": []}
+            # Marker flag so the UI's Stop can force-kill this exact browser.
+            engine_tag = self._config.get("browser", {}).get("engine_tag")
+            if engine_tag:
+                launch_args["args"].append(f"--lead-engine-tag={engine_tag}")
             # Per-offer channel from the engine's config dict, else the env var.
             channel = (self._config.get("browser", {}).get("channel")
                        or os.getenv("BROWSER_CHANNEL", "")).strip().lower()

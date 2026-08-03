@@ -118,6 +118,10 @@ class FormFiller:
 
         with sync_playwright() as pw:
             launch_args: dict[str, Any] = {"headless": headless, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
+            # Marker flag so the UI's Stop can force-kill this exact browser.
+            engine_tag = self._config.get("browser", {}).get("engine_tag")
+            if engine_tag:
+                launch_args["args"].append(f"--lead-engine-tag={engine_tag}")
             channel = (self._config.get("browser", {}).get("channel")
                        or os.getenv("BROWSER_CHANNEL", "chrome")).strip().lower()
             if channel and channel not in ("chromium", "bundled", "default"):

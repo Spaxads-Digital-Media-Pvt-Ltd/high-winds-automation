@@ -4,13 +4,62 @@ Builds a Playwright-compatible fingerprint for each row.
 """
 from __future__ import annotations
 import random
+import re
+import threading
+from collections import deque
 from typing import Any
 import structlog
 from devices_pool import DEVICE_POOL
 from .stealth import _CARRIERS
 
+
+def _ua_os(ua: str) -> str:
+    """Platform implied by the UA — so an iPhone is never labelled Android."""
+    if "iPhone" in ua:
+        return "ios-iphone"
+    if "iPad" in ua:
+        return "ios-ipad"
+    return "android"
+
+
+def _ua_browser(ua: str) -> str:
+    """Engine + major version from a UA, for logging (e.g. 'CriOS/150')."""
+    for name in ("CriOS", "FxiOS", "SamsungBrowser", "Silk", "EdgiOS", "Chrome"):
+        m = re.search(rf"{name}/(\d+)", ua)
+        if m:
+            return f"{name}/{m.group(1)}"
+    m = re.search(r"Version/(\d+)[\d.]*\s+.*Safari", ua)
+    if m:
+        return f"Safari/{m.group(1)}"
+    return "Safari"
+
 # Tracks the last carrier used so we never repeat it on the very next call.
 _last_carrier: list[str] = [""]
+
+# ── Non-repeating device rotation ────────────────────────────────────────────
+# Every row fill (across ALL offers, which run in separate threads) draws the
+# next device from a shared shuffled queue.  No user agent repeats until the
+# whole pool has been used once; then it reshuffles.  The lock makes it safe for
+# the concurrent engine threads, and the reshuffle avoids handing the same UA
+# out back-to-back across a cycle boundary.
+_device_lock = threading.Lock()
+_device_queue: deque[int] = deque()
+_last_device_idx: list[int] = [-1]
+
+
+def _next_device() -> dict[str, Any]:
+    with _device_lock:
+        if not _device_queue:
+            order = list(range(len(DEVICE_POOL)))
+            random.shuffle(order)
+            # Don't repeat the previous UA as the first of the new cycle.
+            if len(order) > 1 and order[0] == _last_device_idx[0]:
+                order[0], order[-1] = order[-1], order[0]
+            _device_queue.extend(order)
+        idx = _device_queue.popleft()
+        _last_device_idx[0] = idx
+    return DEVICE_POOL[idx]
+
 
 log = structlog.get_logger(__name__)
 
@@ -50,6 +99,7 @@ class DeviceManager:
             fp["viewport"] = {"width": vp.get("height", 915), "height": vp.get("width", 412)}
 
         log.info("device.fingerprint", model=fp.get("_model", "random"),
+                 os=fp.get("_os"), browser=fp.get("_browser"),
                  viewport=fp.get("viewport"), locale=fp.get("locale"))
         return fp
 
@@ -73,25 +123,34 @@ class DeviceManager:
         return fp
 
     def _build_random(self) -> dict[str, Any]:
-        """Pick a random device and jitter its properties."""
-        device = random.choice(DEVICE_POOL)
+        """Pick the next (non-repeating) device and jitter its properties."""
+        device = _next_device()
         fp = self._device_to_fp(device)
+        # Jitter around the device's OWN viewport so an iPhone stays iPhone-sized
+        # and an iPad stays iPad-sized — never squashed into an Android phone box
+        # — while still varying a little per row.
         if self._defaults.get("random_viewport", True):
-            w_r = self._defaults.get("viewport_width_range", [360, 430])
-            h_r = self._defaults.get("viewport_height_range", [640, 932])
-            fp["viewport"] = {"width": random.randint(w_r[0], w_r[1]),
-                              "height": random.randint(h_r[0], h_r[1])}
+            base = device["viewport"]
+            fp["viewport"] = {
+                "width":  max(320, base["width"] + random.randint(-6, 6)),
+                "height": max(480, base["height"] + random.randint(-14, 14)),
+            }
         fp["_model"] = device["model"]
         return fp
 
     def _device_to_fp(self, device: dict) -> dict[str, Any]:
         """Convert a DEVICE_POOL entry into a Playwright context dict."""
+        ua = device["user_agent"]
         fp: dict[str, Any] = {
-            "user_agent": device["user_agent"],
+            "user_agent": ua,
             "viewport": dict(device["viewport"]),
             "device_scale_factor": device.get("device_scale_factor", 2.625),
             "is_mobile": device.get("is_mobile", True),
             "has_touch": device.get("has_touch", True),
+            # Internal labels (stripped before new_context) — keep an iPhone an
+            # iPhone in the logs, never mislabelled Android.
+            "_os": device.get("os") or _ua_os(ua),
+            "_browser": _ua_browser(ua),
         }
         self._add_extras(fp)
         return fp
@@ -109,6 +168,7 @@ class DeviceManager:
                          "height": random.randint(h_r[0], h_r[1])},
             "device_scale_factor": round(random.uniform(2.0, 3.5), 1),
             "is_mobile": True, "has_touch": True,
+            "_os": _ua_os(ua), "_browser": _ua_browser(ua),
         }
         self._add_extras(fp)
         return fp

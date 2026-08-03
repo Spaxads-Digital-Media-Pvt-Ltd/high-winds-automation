@@ -137,6 +137,11 @@ class BasePlatformFiller:
                 "headless": headless,
                 "args": ["--no-sandbox", "--disable-dev-shm-usage"],
             }
+            # Marker flag so the UI's Stop can force-kill this exact browser if it
+            # blocks mid-call (e.g. a page that never renders).
+            engine_tag = self._config.get("browser", {}).get("engine_tag")
+            if engine_tag:
+                launch_args["args"].append(f"--lead-engine-tag={engine_tag}")
             # Playwright's *bundled* Chromium reproducibly crashes its renderer
             # on these sites part-way through loading the third-party
             # fraud-detection script — headless and headed alike.  A stock Google
