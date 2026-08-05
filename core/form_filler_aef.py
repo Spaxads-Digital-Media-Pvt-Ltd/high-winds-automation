@@ -139,7 +139,10 @@ class FormFiller(BasePlatformFiller):
 
             done = self._completion_state(page)
             if done:
-                log.info("form.completed", step=step_num, outcome=done, row=row_number)
+                log.info("form.offers_reached", step=step_num, outcome=done, row=row_number)
+                # Not finished yet: the lender-match flow may still ask for bank
+                # details and one or more Continue clicks.  Work through it.
+                self._handle_post_offer(page, f, row_number, stop_event)
                 return done
 
             # A returning applicant is met with a condensed "Loan request
@@ -154,8 +157,11 @@ class FormFiller(BasePlatformFiller):
             if not names:
                 # Between renders, or a non-field interstitial — give it a beat.
                 time.sleep(1.5)
-                if self._completion_state(page):
-                    return self._completion_state(page) or "submitted"
+                done = self._completion_state(page)
+                if done:
+                    log.info("form.offers_reached", step=step_num, outcome=done, row=row_number)
+                    self._handle_post_offer(page, f, row_number, stop_event)
+                    return done
                 continue
 
             sig = ",".join(sorted(names))
@@ -536,3 +542,4 @@ class FormFiller(BasePlatformFiller):
             m = re.search(r"subid=([\w]+)", url)
             return f"redirected to offers ({m.group(1)})" if m else "redirected to offers"
         return ""
+

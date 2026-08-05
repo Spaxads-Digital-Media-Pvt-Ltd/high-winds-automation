@@ -94,6 +94,7 @@ class FormFiller:
         self._target = config.get("target", {})
         self._ss_dir = Path(config.get("screenshots", {}).get("directory", "screenshots"))
         self._ss_dir.mkdir(parents=True, exist_ok=True)
+        self._save_shots = bool(config.get("screenshots", {}).get("enabled", False))
 
     # ------------------------------------------------------------------ public
 
@@ -206,12 +207,17 @@ class FormFiller:
             except Exception:
                 title = ""
 
-            # Reached a completion / offer page
+            # Reached a post-submit / offers page — don't just mark success on the
+            # processing/offers screen: wait for the offers to render and click
+            # the primary offer CTA first.  ("review your" is intentionally left
+            # out — it's a pre-submit confirm step, driven by the normal step
+            # handler, so we never finish before the form is actually submitted.)
             if any(kw in title for kw in [
-                "thank you", "congratulation", "review your", "your offers",
-                "matched", "we found", "processing", "submitted",
+                "thank you", "congratulation", "your offers", "your offer",
+                "matched", "we found", "processing", "submitted", "offer received",
             ]):
                 log.info("form.completed", step=step_num, title=title, row=row_number)
+                self._handle_post_submit(page, row_number)
                 return
 
             if not title:
@@ -315,136 +321,212 @@ class FormFiller:
 
         raise FormFillerError("Form did not complete within 60 steps", error_type="timeout")
 
-    def _handle_post_submit(self, page: Page, row_number: int) -> None:
-        """After 'Request Cash' is clicked, the iframe shows a processing screen
-        (94% spinner with checklist: Request started → Validating → Checking
-        eligibility → Matching lenders → Offer received).
+    # CTA button wording seen on the offer (new-tab) page, most→least specific.
+    _CREDIT_CTA_TEXTS = [
+        "Get Your Credit Score Now",
+        "Get Your FREE Credit Score",
+        "Get Your Free Credit Score",
+        "Get Your Credit Score",
+        "Get My Credit Score",
+        "Credit Score Now",
+        "Credit Score",
+    ]
 
-        The orange 'Get Your FREE Credit Score' button is rendered inside that
-        same iframe immediately and is already visible at ~94%.  We click it as
-        soon as it appears (no need to wait for 100%).  The button opens a new
-        tab; we screenshot it and close it.
+    def _handle_post_submit(self, page: Page, row_number: int) -> None:
+        """After the form is submitted, the offer opens in a NEW TAB.  We switch
+        to that tab and click its 'Get Your Credit Score Now' button (the actual
+        conversion), rather than just screenshotting the offer and closing it.
+
+        The tab may open on its own after submit, or a button in the current
+        iframe may open it — both are handled.  If no separate tab appears, we
+        fall back to clicking the CTA on the current page.
         """
         log.info("form.waiting_offers", row=row_number)
+        ctx = page.context
+        existing = set(ctx.pages)
 
-        # Selectors matching the actual button text seen on the offers screen.
-        # Ordered from most-specific to least-specific.
-        btn_selectors = [
-            "text=Get Your FREE Credit Score",
-            "button:has-text('FREE Credit Score')",
-            "a:has-text('FREE Credit Score')",
-            "text=Get Your Free Credit Score",
-            "button:has-text('Free Credit Score')",
-            "a:has-text('Free Credit Score')",
-            "text=Get Your Credit Score Now",
-            "button:has-text('Credit Score')",
-            "a:has-text('Credit Score')",
-        ]
-
-        def _find_btn():
-            """Return the first visible credit-score button across all frames."""
-            # Search every attached frame first (button lives in the iframe)
-            for f in page.frames:
-                if f.is_detached():
+        def _find_credit_cta(target):
+            """First visible credit-score CTA across every frame of `target`."""
+            for fr in target.frames:
+                if fr.is_detached():
                     continue
-                for sel in btn_selectors:
-                    try:
-                        el = f.locator(sel).first
-                        if el.is_visible(timeout=300):
-                            return el
-                    except Exception:
-                        pass
-            # Fallback: main page
-            for sel in btn_selectors:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=300):
-                        return el
-                except Exception:
-                    pass
+                for txt in self._CREDIT_CTA_TEXTS:
+                    for sel in (f"button:has-text(\"{txt}\")",
+                                f"a:has-text(\"{txt}\")",
+                                f"text={txt}"):
+                        try:
+                            el = fr.locator(sel).first
+                            if el.is_visible(timeout=150):
+                                return el
+                        except Exception:
+                            pass
             return None
 
-        def _offer_received() -> bool:
-            """True when the 'Offer received' checklist item turns green."""
-            for f in page.frames:
-                if f.is_detached():
-                    continue
-                try:
-                    # The item text exists AND the parent has a green/active class
-                    el = f.locator("text=Offer received").first
-                    if el.is_visible(timeout=200):
-                        # Check if it has an active/checked sibling icon
-                        parent = f.evaluate(
-                            """() => {
-                                var els = Array.from(document.querySelectorAll('*'));
-                                for (var e of els) {
-                                    if (e.textContent.trim() === 'Offer received') {
-                                        var p = e.closest('li,div,[class]');
-                                        return p ? p.className : '';
-                                    }
-                                }
-                                return '';
-                            }"""
-                        )
-                        if parent and any(k in parent.lower() for k in ["active", "complete", "check", "done", "green", "success"]):
-                            return True
-                except Exception:
-                    pass
-            return False
-
-        btn = None
-        deadline = time.time() + 150  # generous cap — click as soon as visible
+        # ── 1) Get to the offer tab ──────────────────────────────────────────
+        # Wait for a new tab to appear on its own; if instead a CTA shows up in
+        # the current iframe, click it (that's what opens the tab).
+        offer_page = None
+        start = time.time()
+        deadline = start + 150
         elapsed_log = 0
-        while time.time() < deadline:
-            btn = _find_btn()
-            if btn:
+        while time.time() < deadline and offer_page is None:
+            new_pages = [p for p in ctx.pages if p not in existing]
+            if new_pages:
+                offer_page = new_pages[-1]
                 break
-            # Also check if "Offer received" ticked — means processing done
-            if _offer_received():
-                log.info("form.offer_received_ticked", row=row_number)
-                btn = _find_btn()
-                break
-            now = int(time.time() - (deadline - 150))
+            # No tab yet — maybe a button in the current iframe opens it.  The
+            # specific credit-score CTA is safe to try at once (it only appears
+            # on the offer); only fall back to a generic prominent button after
+            # the screen has settled, so we don't click a processing control.
+            opener = _find_credit_cta(page)
+            if opener is None and (time.time() - start) > 12:
+                fr, _ = self._find_and_mark_cta(page)
+                if fr:
+                    opener = fr.locator('[data-lcf-cta="1"]').first
+            if opener is not None:
+                try:
+                    with ctx.expect_page(timeout=8000) as np:
+                        opener.click()
+                    offer_page = np.value
+                    break
+                except Exception:
+                    # Clicked but no new tab → it navigated in place; treat the
+                    # current page as the offer surface.
+                    offer_page = page
+                    break
+            now = int(time.time() - start)
             if now - elapsed_log >= 15:
                 log.info("form.offers_processing", elapsed_s=now, row=row_number)
                 elapsed_log = now
             time.sleep(2)
 
-        # Screenshot the offers page regardless of outcome
+        if offer_page is None:
+            log.warning("form.offer_tab_not_found", row=row_number)
+            try:
+                page.screenshot(path=str(self._ss_dir / f"row_{row_number}_offers_page.png"),
+                                full_page=True)
+            except Exception:
+                pass
+            return
+
+        # ── 2) On the offer tab, click "Get Your Credit Score Now" ───────────
+        if offer_page is not page:
+            log.info("form.offer_tab_opened", url=(offer_page.url or "")[:80], row=row_number)
+            try:
+                offer_page.wait_for_load_state("domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            try:
+                offer_page.bring_to_front()
+            except Exception:
+                pass
         try:
-            page.screenshot(
-                path=str(self._ss_dir / f"row_{row_number}_offers_page.png"),
-                full_page=True,
-            )
+            offer_page.screenshot(path=str(self._ss_dir / f"row_{row_number}_offer_tab.png"),
+                                   full_page=True)
         except Exception:
             pass
 
-        if not btn:
+        btn = None
+        d2 = time.time() + 60
+        while time.time() < d2:
+            btn = _find_credit_cta(offer_page)
+            if btn:
+                break
+            time.sleep(1)
+        cta_text = "Get Your Credit Score Now"
+        if btn is None:
+            # Fall back to the most prominent primary CTA on the offer tab.
+            fr, txt = self._find_and_mark_cta(offer_page)
+            if fr:
+                btn = fr.locator('[data-lcf-cta="1"]').first
+                cta_text = txt or "primary"
+        if btn is None:
             log.warning("form.credit_btn_not_found", row=row_number)
             return
 
-        log.info("form.clicking_credit_btn", row=row_number)
-        # Button is target="_blank" — catch the new tab with expect_page
+        log.info("form.clicking_credit_btn", cta=cta_text[:40], row=row_number)
+        ctx = offer_page.context
+        before = set(ctx.pages)
         try:
-            with page.context.expect_page(timeout=15000) as new_page_info:
-                btn.click()
-            new_tab = new_page_info.value
-            new_tab.wait_for_load_state("domcontentloaded", timeout=30000)
-            log.info("form.credit_tab_opened", url=new_tab.url[:80], row=row_number)
+            btn.click()
+        except Exception as e:
+            log.warning("form.credit_btn_click_failed", error=str(e), row=row_number)
+            return
+        log.info("form.credit_btn_clicked", row=row_number)
+
+        # Wait for the resulting offer to load — clicking "Get Your Credit Score
+        # Now" leads to another offer, which may open in a further tab or navigate
+        # this page in place.  Watch briefly for a popup tab; if none appears the
+        # click navigated in place, so wait on this page instead.
+        result_page = offer_page
+        popup_deadline = time.time() + 6
+        while time.time() < popup_deadline:
+            new_pages = [p for p in ctx.pages if p not in before]
+            if new_pages:
+                result_page = new_pages[-1]
+                log.info("form.credit_offer_tab", url=(result_page.url or "")[:80], row=row_number)
+                break
+            time.sleep(0.3)
+        for state in ("domcontentloaded", "load", "networkidle"):
             try:
-                new_tab.screenshot(
-                    path=str(self._ss_dir / f"row_{row_number}_credit_tab.png")
-                )
+                result_page.wait_for_load_state(state, timeout=20000)
             except Exception:
                 pass
-            new_tab.close()
+        time.sleep(2)  # let any client-side content settle
+        try:
+            result_page.bring_to_front()
         except Exception:
-            # Fallback: button navigates in the current page (no new tab)
+            pass
+        try:
+            result_page.screenshot(
+                path=str(self._ss_dir / f"row_{row_number}_credit_offer.png"),
+                full_page=True)
+        except Exception:
+            pass
+        log.info("form.credit_offer_loaded", url=(result_page.url or "")[:80], row=row_number)
+
+    def _find_and_mark_cta(self, page: Page):
+        """Find the most prominent *offer* CTA on the post-submit page, mark it
+        with a data attribute, and return (frame, button_text).  Returns
+        (None, "") if nothing suitable is found.  A denylist keeps it off Back /
+        Terms / Privacy / Close and similar non-offer controls, and action-word
+        + prominence scoring picks the real primary button."""
+        js = r"""() => {
+            const deny = /\b(back|terms|privacy|policy|close|menu|home|log\s?in|sign\s?in|sign\s?up|register|unsubscribe|cookie|edit|cancel|no thanks|not now|skip|why|learn more|read more|faq|help|contact|about|disclosure|espa)/i;
+            const good = /(get|continue|see|view|claim|accept|start|apply|next|yes|offer|cash|approv|check|activate|redeem|unlock|request|proceed|finish|complete|show me|get started|see if|qualify|now)/i;
+            const vis = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
+                return e.offsetParent !== null && r.width > 40 && r.height > 16
+                    && s.visibility !== 'hidden' && s.display !== 'none' && parseFloat(s.opacity || '1') > 0.1; };
+            const els = Array.from(document.querySelectorAll(
+                "button, a[href], [role=button], input[type=submit], input[type=button]"));
+            let best = null, bestScore = -1;
+            for (const e of els) {
+                if (!vis(e)) continue;
+                const t = (e.innerText || e.value || '').replace(/\s+/g, ' ').trim();
+                if (!t || t.length > 60) continue;
+                if (deny.test(t)) continue;
+                const r = e.getBoundingClientRect();
+                let score = r.width * r.height;                       // prominence
+                if (good.test(t)) score *= 3;                         // action-y wording
+                if (e.tagName === 'A' && e.target === '_blank') score *= 1.5;
+                if (r.top >= 0 && r.top < window.innerHeight) score *= 1.4;  // above the fold
+                if (score > bestScore) { bestScore = score; best = e; }
+            }
+            if (!best) return '';
+            document.querySelectorAll('[data-lcf-cta]').forEach(el => el.removeAttribute('data-lcf-cta'));
+            best.setAttribute('data-lcf-cta', '1');
+            return (best.innerText || best.value || '').replace(/\s+/g, ' ').trim().slice(0, 50);
+        }"""
+        for fr in page.frames:
+            if fr.is_detached():
+                continue
             try:
-                btn.click()
-                log.info("form.credit_btn_clicked_inline", row=row_number)
-            except Exception as e:
-                log.warning("form.credit_btn_click_failed", error=str(e), row=row_number)
+                txt = fr.evaluate(js)
+            except Exception:
+                txt = ""
+            if txt:
+                return fr, txt
+        return None, ""
 
     # ---------------------------------------------------------------- step handlers
 
@@ -1355,10 +1437,20 @@ class FormFiller:
     # ---------------------------------------------------------------- parsing
 
     def _parse_fields(self, row: dict) -> dict:
+        # Case/space-insensitive header map — sheet tabs are sometimes re-cased
+        # ('Zip Code' vs 'ZIP Code', 'Date Of Birth (Dob)', 'Ssn Full'), which
+        # would otherwise make exact-key lookups miss and report missing data.
+        _norm = {}
+        for _k, _v in row.items():
+            _nk = re.sub(r"\s+", " ", str(_k)).strip().lower()
+            if _nk not in _norm or str(_v or "").strip():
+                _norm[_nk] = _v
+
         def g(*keys: str) -> str:
-            """Return the first non-empty value from the given column keys."""
+            """First non-empty value among the given column keys (case-insensitive)."""
             for k in keys:
-                v = str(row.get(k) or "").strip()
+                nk = re.sub(r"\s+", " ", str(k)).strip().lower()
+                v = str(_norm.get(nk) or "").strip()
                 if v:
                     return v
             return ""
@@ -1668,6 +1760,8 @@ class FormFiller:
     # ---------------------------------------------------------------- utilities
 
     def _screenshot(self, page: Page, row: int, label: str) -> None:
+        if not self._save_shots:
+            return
         try:
             path = self._ss_dir / f"row_{row:04d}_{label}.png"
             page.screenshot(path=str(path), full_page=False)

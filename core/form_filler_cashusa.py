@@ -59,7 +59,7 @@ from typing import Any, Callable
 import structlog
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
-from core.lead_platform import _aba_checksum_ok, _digits
+from core.lead_platform import BasePlatformFiller, _aba_checksum_ok, _digits
 from utils.proxy_manager import ProxyManager
 from utils.stealth import inject_stealth
 
@@ -94,12 +94,35 @@ class FormFiller:
 
     default_url = "https://www.cashusa.com/get-started"
 
+    # Borrow the shared post-offer handler (wait for the offers page, click the
+    # "Start Here!" / Continue CTA, follow it into its new window, wait to load).
+    # It only needs _screenshot / _check_stop / _live, which this class provides.
+    _JS_POST_STATE = BasePlatformFiller._JS_POST_STATE
+    _JS_FILL_BANK = BasePlatformFiller._JS_FILL_BANK
+    _JS_CLICK_CONTINUE = BasePlatformFiller._JS_CLICK_CONTINUE
+    _handle_post_offer = BasePlatformFiller._handle_post_offer
+
     def __init__(self, config: dict) -> None:
         self._config = config
         self._target = config.get("target", {})
-        self._delays = config.get("delays", {})
+        # CashUSA is a long one-question-per-screen wizard with no per-field
+        # timing checks — run it noticeably faster than the human-paced browser
+        # fillers, while waiting LONGER on the post-submit offer page so the
+        # offer has time to load.  Any of these can be overridden from
+        # config.yaml → delays (cashusa_* keys).
+        cd = config.get("delays", {})
+        self._delays = {
+            "min_typing_delay": cd.get("cashusa_min_typing", 0.015),
+            "max_typing_delay": cd.get("cashusa_max_typing", 0.05),
+            "min_action_delay": cd.get("cashusa_min_action", 0.2),
+            "max_action_delay": cd.get("cashusa_max_action", 0.55),
+            "read_pause":       cd.get("cashusa_read_pause", [0.15, 0.4]),
+            # extra time to let the offer window load after clicking "Start Here!"
+            "offer_load_wait":  cd.get("cashusa_offer_load_wait", 12),
+        }
         self._ss_dir = Path(config.get("screenshots", {}).get("directory", "screenshots"))
         self._ss_dir.mkdir(parents=True, exist_ok=True)
+        self._save_shots = bool(config.get("screenshots", {}).get("enabled", False))
         self._max_steps = int(config.get("form", {}).get("max_steps", 45))
 
     # ------------------------------------------------------------------ public
@@ -208,7 +231,11 @@ class FormFiller:
             self._check_stop(stop_event)
             done = self._completion_state(page)
             if done:
-                log.info("form.completed", step=step, outcome=done, row=row_number)
+                log.info("form.offers_reached", step=step, outcome=done, row=row_number)
+                # Not finished: the offers page (e.g. TopFiveOffers) shows CTAs
+                # ("Start Here!") that open the offer in a new window — click one
+                # and wait for it to load.
+                self._handle_post_offer(page, f, row_number, stop_event)
                 return done
 
             st = self._state(page)
@@ -216,8 +243,11 @@ class FormFiller:
                 if st["loading"]:
                     time.sleep(2); continue
                 time.sleep(1.5)
-                if self._completion_state(page):
-                    return self._completion_state(page) or "submitted"
+                done = self._completion_state(page)
+                if done:
+                    log.info("form.offers_reached", step=step, outcome=done, row=row_number)
+                    self._handle_post_offer(page, f, row_number, stop_event)
+                    return done
                 continue
 
             sig = st["sig"]
@@ -272,10 +302,15 @@ class FormFiller:
                 ok = self._click_choice(page, re.escape(ans))
                 log.info("form.choice", q=st["question"][:50], answer=ans, ok=ok, row=row_number)
                 return ok
-        # Field step: fill every recognised control.
+        # Field step: fill every recognised control (and tick consent checkboxes).
         any_ok = False
         for fld in st["fields"]:
             fid = fld["id"]
+            # "I agree" / authorization checkboxes ("Last questions, almost done!")
+            # must be ticked to enable Submit — they carry no lead value.
+            if fld.get("type") == "checkbox":
+                any_ok = self._check_box(page, fid) or any_ok
+                continue
             val = self._value_for(fid, f)
             if val is None:
                 log.warning("form.unmapped_field", id=fid, row=row_number)
@@ -284,6 +319,16 @@ class FormFiller:
                 any_ok = self._set_select(page, fid, val) or any_ok
             else:
                 any_ok = self._set_text(page, fid, val) or any_ok
+        # Consent step whose checkbox wasn't a recognised field (custom-styled or
+        # hidden input): tick any agreement checkbox so Submit becomes enabled.
+        if not any_ok and self._tick_consent(page):
+            log.info("form.consent", row=row_number)
+            any_ok = True
+        # Acknowledgement step that just needs Continue/Submit (e.g. "Access to
+        # additional lenders" with a box already ticked) — advance it.
+        if not any_ok and self._is_ack_step(page):
+            log.info("form.ack_step", row=row_number)
+            any_ok = True
         # Let blur/validation settle before the loop clicks Continue — masked
         # phone fields in particular reject a Continue that lands mid-keystroke.
         try:
@@ -292,6 +337,69 @@ class FormFiller:
             pass
         time.sleep(0.5)
         return any_ok
+
+    def _check_box(self, page: Page, fid: str) -> bool:
+        """Tick a checkbox by id (tries its label, wrapping label, the input, then
+        a forced check) — returns True once it is checked."""
+        try:
+            return bool(page.evaluate("""(id) => {
+                const el = document.getElementById(id);
+                if (!el) return false;
+                if (el.checked) return true;
+                const lab = document.querySelector('label[for="' + id + '"]');
+                if (lab) lab.click();
+                if (!el.checked) { const w = el.closest('label'); if (w) w.click(); }
+                if (!el.checked) el.click();
+                if (!el.checked) { el.checked = true;
+                    el.dispatchEvent(new Event('change', {bubbles:true}));
+                    el.dispatchEvent(new Event('input', {bubbles:true})); }
+                return el.checked;
+            }""", fid))
+        except Exception:
+            return False
+
+    def _is_ack_step(self, page: Page) -> bool:
+        """A 'Last questions, almost done!' acknowledgement step (authorizations /
+        access to additional lenders) whose box may already be ticked — it just
+        needs a Continue/Submit click to advance."""
+        try:
+            return bool(page.evaluate("() => {" + self._JS_VIS + r"""
+                const body = (document.body ? document.body.innerText : '').toLowerCase();
+                const ack = /(almost done|required authorizations|access to additional lenders|by clicking .?submit|we are required by law|i agree|authoriz)/.test(body);
+                const hasBtn = Array.from(document.querySelectorAll('button,input[type=submit]'))
+                    .filter(vis).filter(e => !e.disabled)
+                    .some(e => /^(continue|submit|next)$/i.test((e.innerText || e.value || '').replace(/\s+/g,' ').trim()));
+                return ack && hasBtn;
+            }"""))
+        except Exception:
+            return False
+
+    def _tick_consent(self, page: Page) -> bool:
+        """Tick every unchecked agreement/authorization checkbox on the page
+        (including custom-styled ones), or click an 'I agree' control.  Returns
+        True if something was ticked."""
+        try:
+            return bool(page.evaluate("() => {" + self._JS_VIS + r"""
+                let did = false;
+                document.querySelectorAll('input[type=checkbox]').forEach(cb => {
+                    if (cb.checked) return;
+                    const lab = cb.id ? document.querySelector('label[for="' + cb.id + '"]') : null;
+                    const wrap = cb.closest('label');
+                    if (lab) lab.click(); else if (wrap) wrap.click(); else cb.click();
+                    if (!cb.checked) { cb.checked = true;
+                        cb.dispatchEvent(new Event('change', {bubbles:true}));
+                        cb.dispatchEvent(new Event('input', {bubbles:true})); }
+                    if (cb.checked) did = true;
+                });
+                if (!did) {
+                    const el = Array.from(document.querySelectorAll('label,span,div,button,[role=checkbox]'))
+                        .filter(vis).find(e => /^\s*i agree\b/i.test((e.innerText || '').trim()));
+                    if (el) { el.click(); did = true; }
+                }
+                return did;
+            }"""))
+        except Exception:
+            return False
 
     # ------------------------------------------------------------- lead -> field
 
@@ -591,14 +699,31 @@ class FormFiller:
     def _completion_state(self, page: Page) -> str:
         try:
             url = page.url or ""
-            body = page.evaluate("() => (document.body ? document.body.innerText : '').slice(0, 400)") or ""
+            body = page.evaluate(
+                "() => (document.body ? document.body.innerText : '').slice(0, 2000)") or ""
         except Exception:
             return ""
-        if re.search(r"(offers?|results|congratulat|you'?re connected|matching you|thank you for)", body, re.I) \
-                and not re.search(r"loan request|what is your|do you", body, re.I):
+        low = body.lower()
+        # 1) Redirected off the SmartForm host to an offers / advertiser page.
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(url).netloc.lower()
+        except Exception:
+            host = ""
+        if host and "cashusa.com" not in host and "roundsky" not in host:
+            return f"redirected ({host})"
+        # 2) The "Last questions, almost done!" CONSENT steps (Access to additional
+        #    lenders / marketing / Required authorizations) mention 'offer'/'lenders'
+        #    but are NOT the results page — let the normal step loop tick + Submit
+        #    them.  The real offers page never says "last questions, almost done".
+        if re.search(r"(last questions|almost done|required authorizations|access to additional lenders|by clicking .?submit|we are required by law|i authorize this site)", low):
+            return ""
+        # 3) Genuine post-submit offers / processing page (hand off to the
+        #    post-offer handler, which waits out the search and clicks the CTA).
+        #    Detected by text markers so it fires even while the SmartForm shell
+        #    is still on screen (the search state keeps `.sf-` around).
+        if re.search(r"(connecting with (our )?network|searching for (the )?best offers|you were matched|matched with these offers|the following offers|these offers|top ?five ?offers|we have multiple offers|congratulat|you'?re connected|thank you for your request|your request (is )?complete)", low):
             return "results / offers page"
-        if any(k in url for k in ("results", "offers", "thank", "confirm")):
-            return f"redirected ({url[:60]})"
         return ""
 
     @staticmethod
@@ -634,9 +759,18 @@ class FormFiller:
     # ---------------------------------------------------------------- parsing
 
     def _parse_fields(self, row: dict) -> dict:
+        # Case/space-insensitive header map — sheet tabs are sometimes re-cased
+        # ('Zip Code' vs 'ZIP Code', 'Date Of Birth (Dob)', 'Ssn Full').
+        _norm = {}
+        for _k, _v in row.items():
+            _nk = re.sub(r"\s+", " ", str(_k)).strip().lower()
+            if _nk not in _norm or str(_v or "").strip():
+                _norm[_nk] = _v
+
         def g(*keys: str) -> str:
             for k in keys:
-                v = str(row.get(k) or "").strip()
+                nk = re.sub(r"\s+", " ", str(k)).strip().lower()
+                v = str(_norm.get(nk) or "").strip()
                 if v: return v
             return ""
 
@@ -823,6 +957,8 @@ class FormFiller:
     # ---------------------------------------------------------------- utilities
 
     def _screenshot(self, page: Page, row: int, label: str) -> None:
+        if not self._save_shots:
+            return
         try:
             page.screenshot(path=str(self._ss_dir / f"row_{row:04d}_{label}.png"), full_page=False)
         except Exception as e:

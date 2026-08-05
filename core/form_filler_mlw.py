@@ -202,7 +202,10 @@ class FormFiller(BasePlatformFiller):
 
             done = self._completion_state(page)
             if done:
-                log.info("form.completed", step=step_num, outcome=done, row=row_number)
+                log.info("form.offers_reached", step=step_num, outcome=done, row=row_number)
+                # Not finished yet: the lender-match flow may still ask for bank
+                # details and one or more Continue clicks.  Work through it.
+                self._handle_post_offer(page, f, row_number, stop_event)
                 return done
 
             # A returning applicant (same identity seen before) is met with a

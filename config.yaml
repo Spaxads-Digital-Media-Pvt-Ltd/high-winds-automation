@@ -15,7 +15,7 @@ target:
 
 # --- Form behaviour ---
 form:
-  max_steps: 40                 # safety cap on wizard iterations per lead
+  max_steps: 55                 # safety cap on wizard iterations per lead
 
 # --- Retry & Backoff ---
 retry:
@@ -66,6 +66,9 @@ device_defaults:
 
 # --- Screenshots ---
 screenshots:
+  enabled: false                # save per-lead debug screenshots (success/error/
+                                # step captures). false = off; the UI live preview
+                                # (live_view.png) is unaffected.
   on_failure: true
   on_success: false
   directory: "screenshots"

@@ -109,6 +109,7 @@ class BasePlatformFiller:
         self._delays = config.get("delays", {})
         self._ss_dir = Path(config.get("screenshots", {}).get("directory", "screenshots"))
         self._ss_dir.mkdir(parents=True, exist_ok=True)
+        self._save_shots = bool(config.get("screenshots", {}).get("enabled", False))
         self._max_steps = int(config.get("form", {}).get("max_steps", 40))
         self._crashed = False   # per-row; reset at the top of process_row
 
@@ -302,9 +303,19 @@ class BasePlatformFiller:
     # ---------------------------------------------------------------- parsing
 
     def _parse_fields(self, row: dict) -> dict:
+        # Case/space-insensitive header map — sheet tabs are sometimes re-cased
+        # ('Zip Code' vs 'ZIP Code', 'Date Of Birth (Dob)', 'Ssn Full'), which
+        # would otherwise make exact-key lookups miss and report missing data.
+        _norm = {}
+        for _k, _v in row.items():
+            _nk = re.sub(r"\s+", " ", str(_k)).strip().lower()
+            if _nk not in _norm or str(_v or "").strip():
+                _norm[_nk] = _v
+
         def g(*keys: str) -> str:
             for k in keys:
-                v = str(row.get(k) or "").strip()
+                nk = re.sub(r"\s+", " ", str(k)).strip().lower()
+                v = str(_norm.get(nk) or "").strip()
                 if v:
                     return v
             return ""
@@ -544,11 +555,242 @@ class BasePlatformFiller:
             pass
 
     def _screenshot(self, page: Page, row: int, label: str) -> None:
+        if not self._save_shots:
+            return
         try:
             path = self._ss_dir / f"row_{row:04d}_{label}.png"
             page.screenshot(path=str(path), full_page=False)
         except Exception as e:
             log.warning("screenshot.failed", error=str(e)[:80])
+
+    # ---------------------------------------------------------- post-offer flow
+    # Shared by AEF and MyLendingWallet — same lender-match back-end.
+
+    # Still working ("Thank you for your request / Connecting with our network of
+    # trusted lenders") — wait, don't act.
+    _JS_POST_STATE = r"""() => {
+        const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
+        const t = e => (e.innerText || e.value || '').replace(/\s+/g, ' ').trim();
+        const body = (document.body ? document.body.innerText : '').toLowerCase();
+        const processing = /(connecting with|trusted lenders|should only take|do not refresh|do not leave|please wait|one moment|processing your|matching you|finding you|searching for|finalis|finaliz)/.test(body);
+        const fields = Array.from(document.querySelectorAll('input,select,textarea'))
+            .filter(e => vis(e) && e.type !== 'hidden' && !e.disabled && !e.readOnly)
+            .map(e => (e.name || e.id || ''));
+        const buttons = Array.from(document.querySelectorAll(
+                'button,input[type=submit],input[type=button],[role=button],a.btn,a.button'))
+            .filter(e => vis(e) && !e.disabled).map(t).filter(x => x && x.length < 40);
+        return { processing, fields, buttons, sig: fields.join(',') + '|' + buttons.join(',') };
+    }"""
+
+    # Fill any bank / routing / account fields the offer asks for, from the lead.
+    # Skips fields that already carry a value; matches by name/id/placeholder/label.
+    _JS_FILL_BANK = r"""(V) => {
+        const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
+        const setV = (el, val) => { const p = Object.getPrototypeOf(el);
+            const d = Object.getOwnPropertyDescriptor(p, 'value') || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+            d.set.call(el, val); ['input','change','blur'].forEach(ev => el.dispatchEvent(new Event(ev, {bubbles:true}))); };
+        const key = e => {
+            let s = (e.name||'') + ' ' + (e.id||'') + ' ' + (e.placeholder||'') + ' ' + (e.getAttribute('aria-label')||'');
+            const lf = e.id ? document.querySelector('label[for="' + e.id + '"]') : null;
+            if (lf) s += ' ' + (lf.innerText || '');
+            const wrap = e.closest('label');            // radios/checkboxes often wrap their label
+            if (wrap) s += ' ' + (wrap.innerText || '');
+            return s.toLowerCase();
+        };
+        let n = 0;
+        document.querySelectorAll('input,select').forEach(e => {
+            if (!vis(e) || e.disabled || e.readOnly || e.type === 'hidden' || e.type === 'radio' || e.type === 'checkbox') return;
+            const k = key(e);
+            if (e.tagName === 'SELECT') {
+                if (/account type|acct type|type of account/.test(k)) {
+                    const o = Array.from(e.options).find(o => new RegExp(V.account_type, 'i').test(o.text));
+                    if (o) { e.value = o.value; e.dispatchEvent(new Event('change', {bubbles:true})); n++; }
+                }
+                return;
+            }
+            if (e.value && e.value.trim()) return;             // don't overwrite prefilled
+            if (/routing|\baba\b|\brtn\b/.test(k))                  { setV(e, V.routing_number); n++; }
+            else if (/account\s*(number|no|#)|acct\s*(number|no|#)/.test(k)
+                     || (/account/.test(k) && !/type/.test(k)))    { setV(e, V.account_number); n++; }
+            else if (/bank\s*name/.test(k) || (/bank/.test(k) && !/account/.test(k))) { setV(e, V.bank_name); n++; }
+        });
+        // account-type radios (checking / savings)
+        const at = (V.account_type || '').toLowerCase();
+        document.querySelectorAll('input[type=radio]').forEach(e => {
+            if (!vis(e)) return; const k = key(e);
+            if (/account type|acct|checking|savings/.test(k)) {
+                if ((at.includes('sav') && /sav/.test(k)) || (at.includes('check') && /check/.test(k))) {
+                    if (!e.checked) { e.click(); n++; }
+                }
+            }
+        });
+        return n;
+    }"""
+
+    # Find a Continue / Accept-style button (never Back / Decline / Cancel).
+    # dryRun=true returns its text without clicking, so the caller can arm a
+    # popup listener before the real click.
+    _JS_CLICK_CONTINUE = r"""(dryRun) => {
+        const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
+        const t = e => (e.innerText || e.value || '').replace(/\s+/g, ' ').trim();
+        const go = /^(continue|next|accept|agree|submit|proceed|confirm|finish|get started|start here|start now|start|see my|see offers?|see if|view|view my|view offer|view details|get my|get offer|get started now|claim|redeem|show me|complete|i agree|apply now|apply|yes\b.*|accept.*offer|get.*offer|see.*offer)/i;
+        const no = /(back|cancel|decline|no thanks|edit|previous|return to|log ?in|sign ?in|sign ?up|español|terms|disclosure|privacy|conditions)/i;
+        const b = Array.from(document.querySelectorAll(
+                'button,input[type=submit],input[type=button],[role=button],a.btn,a.button,a'))
+            .filter(vis).filter(e => !e.disabled)
+            .find(e => { const s = t(e); return s && s.length < 40 && go.test(s) && !no.test(s); });
+        if (b) { if (!dryRun) b.click(); return t(b).slice(0, 40); }
+        return '';
+    }"""
+
+    def _handle_post_offer(self, page: Page, f: dict, row_number: int, stop_event) -> None:
+        """After the application is routed to the lender-match flow ("Thank you
+        for your request / Connecting with our network of trusted lenders"), the
+        site may ask for bank/routing details to finalise an offer, then present
+        one or more Continue buttons.  Work through it: wait out the processing,
+        fill the bank fields, click Continue, and repeat until it settles."""
+        log.info("form.post_offer_start", row=row_number)
+        self._screenshot(page, row_number, "post_offer_arrived")
+        # account_type is parsed as a code ("1" checking / "2" savings) — map it
+        # to a word so it can match the offer page's Checking/Savings controls.
+        at_raw = str(f.get("account_type", "") or "").strip().lower()
+        account_type_word = "savings" if at_raw in ("2", "savings", "sav", "s") else "checking"
+        # Accept both key conventions: AEF/MLW use routing_number/account_number,
+        # CashUSA (which borrows this handler) uses routing/account.
+        bank_vals = {
+            "routing_number": f.get("routing_number") or f.get("routing", ""),
+            "account_number": f.get("account_number") or f.get("account", ""),
+            "bank_name":      f.get("bank_name", "") or "",
+            "account_type":   account_type_word,
+        }
+        ctx = page.context
+        cur = page                          # current surface — may switch to an offer tab
+        # Let the arriving offers page begin loading before we poll it.
+        for state in ("domcontentloaded", "load"):
+            try:
+                cur.wait_for_load_state(state, timeout=15000)
+            except Exception:
+                pass
+
+        def _find_cta():
+            """First frame carrying a Continue/View/Start-Here CTA, and its text.
+            Offer cards are frequently rendered inside ad iframes."""
+            for fr in cur.frames:
+                try:
+                    if fr.is_detached():
+                        continue
+                    txt = fr.evaluate(self._JS_CLICK_CONTINUE, True) or ""
+                except Exception:
+                    txt = ""
+                if txt:
+                    return fr, txt
+            return None, ""
+
+        deadline = time.time() + 240        # a few minutes, per the on-screen note
+        clicks = 0
+        max_clicks = 6                      # safety cap for in-place Continue chains
+        proc_logged = 0.0
+        last_progress = time.time()
+        last_click = None                   # (url, cta) — detects a no-op re-click
+        while time.time() < deadline:
+            self._check_stop(stop_event)
+            try:
+                self._live(cur)
+            except Exception:
+                pass
+            try:
+                st = cur.evaluate(self._JS_POST_STATE)
+            except Exception:
+                time.sleep(2)
+                continue
+
+            # 1) Fill any bank/routing fields the offer is asking for.
+            filled = 0
+            try:
+                filled = cur.evaluate(self._JS_FILL_BANK, bank_vals) or 0
+            except Exception:
+                filled = 0
+            if filled:
+                log.info("form.post_offer_bank_filled", count=filled, row=row_number)
+                self._screenshot(cur, row_number, "post_offer_bank")
+                last_progress = time.time()
+                time.sleep(1)
+
+            # 2) A Continue / View / "Start Here!" CTA (searched across frames).
+            cta_fr, cta = (_find_cta() if clicks < max_clicks else (None, ""))
+            if cta_fr is not None:
+                here = ((cur.url or ""), cta)
+                if here == last_click:
+                    # Same button on the same page as last time — the previous
+                    # click didn't advance, so stop rather than spam it.
+                    log.info("form.post_offer_no_progress", button=cta, row=row_number)
+                    break
+                last_click = here
+                clicks += 1
+                last_progress = time.time()
+                log.info("form.post_offer_continue", button=cta, row=row_number)
+                new_tab = None
+                try:
+                    with ctx.expect_page(timeout=8000) as pinfo:
+                        cta_fr.evaluate(self._JS_CLICK_CONTINUE, False)   # actually click
+                    new_tab = pinfo.value
+                except Exception:
+                    new_tab = None           # no popup — navigated in place
+                if new_tab is not None:
+                    # The offer opened in its own window ("results will open in a
+                    # new window") — that's the destination.  Follow it, give it
+                    # time to load (it's often an interstitial that then redirects
+                    # to the lender), and STOP; do not drill into the advertiser's
+                    # own application funnel.
+                    cur = new_tab
+                    log.info("form.post_offer_tab", url=(cur.url or "")[:80], row=row_number)
+                    settle = float(self._delays.get("offer_load_wait", 6))
+                    for state in ("domcontentloaded", "load", "networkidle"):
+                        try:
+                            cur.wait_for_load_state(state, timeout=20000)
+                        except Exception:
+                            pass
+                    try:
+                        cur.bring_to_front()
+                    except Exception:
+                        pass
+                    time.sleep(settle)
+                    # In case it redirected to the lender during the settle, wait
+                    # for that page to load too before finishing.
+                    for state in ("domcontentloaded", "networkidle"):
+                        try:
+                            cur.wait_for_load_state(state, timeout=15000)
+                        except Exception:
+                            pass
+                    log.info("form.post_offer_loaded", url=(cur.url or "")[:80], row=row_number)
+                    break
+                # In-place navigation (a Continue/Submit on the aggregator) —
+                # wait for it and keep going through the flow.
+                for state in ("domcontentloaded", "load"):
+                    try:
+                        cur.wait_for_load_state(state, timeout=15000)
+                    except Exception:
+                        pass
+                time.sleep(2)
+                continue
+
+            # 3) No CTA yet.  If the offers page is still searching / connecting
+            #    ("Searching for the best offers…"), keep waiting for the cards.
+            if st.get("processing"):
+                if time.time() - proc_logged > 15:
+                    log.info("form.post_offer_processing", row=row_number)
+                    proc_logged = time.time()
+                time.sleep(3)
+                continue
+
+            # 4) Not processing and nothing to click — give ad-loaded cards time
+            #    to render, then finish if still nothing after a while.
+            if not filled and time.time() - last_progress > 45:
+                break
+            time.sleep(2)
+
+        self._screenshot(cur, row_number, "post_offer_final")
+        log.info("form.post_offer_done", clicks=clicks, row=row_number)
 
     def _classify_error(self, exc: Exception) -> str:
         msg = str(exc).lower()
