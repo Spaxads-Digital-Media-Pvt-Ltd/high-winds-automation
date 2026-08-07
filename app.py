@@ -77,6 +77,15 @@ ALL_OFFERS: dict[str, dict] = {
         "sheet_ws_env":  "SHEET_WS_CASHUSA",
         "enabled":       True,
     },
+    "rightloansusa": {
+        "name":          "RightLoansUSA",
+        "url":           "https://www.rightloansusa.com/",
+        "filler":        "core.form_filler_rightloansusa",
+        "color":         "#a78bfa",
+        "sheet_url_env": "SHEET_URL_RIGHTLOANS",
+        "sheet_ws_env":  "SHEET_WS_RIGHTLOANS",
+        "enabled":       True,
+    },
 }
 
 # What the UI, the engines and the scheduler actually see.  Disabled offers are
