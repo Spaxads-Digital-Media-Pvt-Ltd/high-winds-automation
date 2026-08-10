@@ -3,56 +3,21 @@
 Reads leads from Google Sheets, rotates proxy + device fingerprint per attempt,
 fills a loan application via Playwright, and writes the result back to the sheet.
 
-Four offers:
+One offer:
 
 | Offer | Front-end | Sheet tab | Filler |
 |-------|-----------|-----------|--------|
 | American Emergency Fund | server-rendered Bootstrap wizard | `American Emergency Fund` | `form_filler_aef` (shared platform) |
-| MyLendingWallet | React SPA (react-hook-form) | `MyLendingWallet` | `form_filler_mlw` (shared platform) |
-| Low Credit Finance | iframe.global multi-step form | `Low Credit Finance` | `form_filler_lowcredit` (standalone) |
-| CashUSA | Round Sky Vue "SmartForm" | `CashUSA` | `form_filler_cashusa` (standalone) |
 
 Each offer carries an `enabled` flag in `ALL_OFFERS` ([app.py](app.py)); setting
 it to `False` takes an offer out of the UI without deleting anything.
 
-AEF and MyLendingWallet run the same backend lead platform, so
-`core/lead_platform.py` holds everything they share — the 31-field vocabulary,
+`core/lead_platform.py` holds the platform layer — the 31-field vocabulary,
 sheet parsing, value mapping and validation, and the browser lifecycle — and
-each filler subclasses it with only its own DOM layer. Low Credit Finance and
-CashUSA are different platforms, so their fillers are standalone; both are
-interface-compatible with the engine (same
-`FormFiller`/`FormFillerError`/`process_row` contract).
-
-**CashUSA** (`form_filler_cashusa.py`) drives the `/get-started` → **Skip
-lookup** path, which bypasses the identity-verification lookup and goes straight
-to the full manual form. It is a single long one-question-per-screen wizard,
-dispatched by reading each screen's visible controls / question text and
-answering from the lead:
-
-- **Text/select steps** — name, DOB, loan reason, amount, address, contact,
-  length-at-address, income source, time employed, pay frequency, monthly
-  income, employer (name/phone/title), driver's license (+ state), SSN, bank
-  ABA + account number, credit rating, unsecured-debt range.
-- **Duet date picker** — `nextPayday` (month/year selects + day grid). Missing
-  "Next Payday" in the sheet auto-computes to ~2 weeks out.
-- **Yes/No & choice screens** — own-home, military, account type
-  (Checking/Savings), direct-deposit vs paper check, and the "own a paid-off
-  car?" title-loan upsell (answered **No**). Detection tolerates descriptive
-  labels ("No, I don't").
-
-Two CashUSA specifics worth knowing:
-
-- **Employer phone must differ from the applicant's phone**, or the SmartForm
-  rejects it ("INVALID EMPLOYER PHONE"). The parser uses the lead's
-  `Employer Work Phone` when present and distinct; otherwise it derives a
-  distinct, valid US number from the applicant's so the required field passes.
-- **Runs on the `chrome` channel** (the default), like AEF/MyLendingWallet.
-
-Sheet-column reconciliation (the shared 42-column layout uses slightly different
-names than CashUSA's fields): `Credit Score Rating` → credit rating,
-`Years at Bank` → months-at-bank (×12), `Credit Card Debt` → unsecured-debt.
-`Job Title` isn't in the layout, so it defaults to "Employee"; add a
-`Job Title` column if you want real values.
+`form_filler_aef` subclasses it with only the site's own DOM layer. Additional
+offers plug in the same way: a filler that is interface-compatible with the
+engine (same `FormFiller`/`FormFillerError`/`process_row` contract) plus one
+entry in `ALL_OFFERS`.
 
 ---
 
@@ -75,8 +40,7 @@ lead-automation/
 │   └── lead_pacer.py       # Hour-by-hour lead release scheduler
 ├── core/
 │   ├── lead_platform.py    # shared platform layer (parsing, mapping, browser lifecycle)
-│   ├── form_filler_aef.py  # americanemergencyfund.com — Bootstrap wizard DOM
-│   └── form_filler_mlw.py  # mylendingwallet.com — React SPA DOM
+│   └── form_filler_aef.py  # americanemergencyfund.com — Bootstrap wizard DOM
 ├── logs/                   # Structured log files (git-ignored)
 └── screenshots/            # Live preview + failure captures (git-ignored)
 ```
@@ -179,97 +143,6 @@ outcome written to the sheet's `Notes` column.
 
 ---
 
-## ⚠️ Validating the MyLendingWallet filler
-
-**Verified against the live form** by walking every step (stopping before the
-final submit — no application was completed). All steps now fill and advance:
-loan amount · name/DOB · email/SSN-4 · phone · address+state · debt · homeowner ·
-income · pay frequency · military · employer · employment length · work phone ·
-driver's licence + state · SSN · account type.
-
-Two bugs were found and fixed this way, both of which had been failing in
-production:
-
-* **Choice steps rejected every value.** The filler matched options by their
-  visible label using AEF's wording, but this site words them differently
-  ("5+ years" not "5 years or more", "Under 1 year" not "1 year or less",
-  "self-employed" hyphenated). It turns out these are real
-  `<input type=radio name=X value=Y>` groups carrying the platform's own
-  values — the same values as AEF — so they are now set **by value** and the
-  wording is irrelevant.
-* **State dropdowns never took, and one failed silently.** `hstate` and `licst`
-  are HeroUI `<Select>` components: the element holding the `name` is a
-  visually-hidden a11y mirror, and writing it leaves React's state untouched.
-  `licst` surfaced as "stuck at licn,licst"; `hstate` failed *quietly* because
-  the address step advanced on its text fields alone — meaning **leads
-  submitted before this fix had an empty home state**. Both now drive the real
-  listbox.
-
-Also confirmed, against the `mlw/` mock: the filler drives all 23 steps and
-sets all 31 fields correctly, including choice-only steps that expose no named
-input — those are identified from their option labels, falling back to the
-question heading for the fields whose options are identical (`ishowner` /
-`isactmil` / `isdd` are all Yes/No; the three tenure questions share one set).
-
-What is *inferred*, not verified: the option labels and question headings for
-steps 1+. They are taken
-from AEF's vocabulary because both sites share the platform's copy, and step 0's
-three labels match exactly — but the site fetches step content from the server
-at runtime, so it is not in the bundle and could not be read statically.
-
-Walking further requires submitting to the live advertiser, which has not been
-done. To finish validation, either:
-
-* run one real, consented lead through it and read the run log — every
-  unmatched label is logged with `form.choice_not_found` including the labels
-  actually on screen, so one pass identifies any gap; or
-* walk the form manually in a browser and capture each step's button labels.
-
-The filler fails loudly rather than silently on a mismatch: `unhandled_step` for
-an unrecognised field, `field_rejected` for a label it cannot find.
-
----
-
-## ✅ Validating the CashUSA filler
-
-**Verified against the live form, end to end**, via the `/get-started` → Skip
-lookup path with fake test data (John Sample, fabricated SSN/bank). Every screen
-maps and advances, in this order:
-
-> name → DOB → loan reason → amount → address → contact (email/phone) →
-> length-at-address → own-home (Y/N) → income source → time employed →
-> pay frequency → military (Y/N) → monthly income → **next payday (Duet picker)**
-> → employer (name/phone/title) → driver's licence + state → SSN →
-> account type (Checking/Savings) → direct-deposit vs paper-check →
-> months-at-bank → **bank ABA + account number** → credit rating →
-> unsecured debt → own-a-paid-off-car (Y/N) → **offers/results page**.
-
-Bugs found and fixed while walking it:
-
-* **Employer phone equal to the applicant's is rejected** ("INVALID EMPLOYER
-  PHONE") — the field stayed invalid and Continue stayed disabled, stalling the
-  run. Fixed by deriving a distinct valid number when the lead has no separate
-  employer phone (see above).
-* **Human-pacing pause before Continue trapped a step** — a masked-phone async
-  re-validation ~1s after blur briefly disables Continue, so the loop now clicks
-  Continue promptly and takes its human beat *after* advancing.
-* **Non-Yes/No choice screens and descriptive Yes/No labels** ("Checking" /
-  "Savings", "No, I don't") weren't handled — now dispatched by matching the
-  lead value / answer-word prefix.
-
-⚠️ **A full run submits.** CashUSA's final qualifier ("own a paid-off car?")
-**auto-advances on click straight to the offers/results page** — there is no
-separate consent+submit button to stop at. So any complete pass delivers the
-lead to the live Round Sky backend. This is correct for production (real leads),
-but it means the filler must never be run to completion with fake data; validate
-by stopping before the final qualifier.
-
-The filler fails loudly on a gap: `unhandled_step` for an unrecognised
-screen, `stuck` if a step won't advance, and it logs `form.unmapped_field` /
-`form.select_no_option` (with the available options) for any field it can't map.
-
----
-
 ## ⚠️ Browser Engine: use Google Chrome, not bundled Chromium
 
 **Playwright's bundled Chromium crashes its renderer on this site** part-way
@@ -313,31 +186,23 @@ python devtools/serve_mock.py
 | Offer | Mock URL |
 |-------|----------|
 | American Emergency Fund | `http://127.0.0.1:8799/aef/index.html` |
-| MyLendingWallet | `http://127.0.0.1:8799/mlw/index.html` |
 
-Set **Settings → Target URLs** to the relevant one and press Start. Everything
-else is real: sheet read, engine, retries, live preview, status write-back.
+Set **Settings → Target URLs** to it and press Start. Everything else is real:
+sheet read, engine, retries, live preview, status write-back.
 
-**The two mocks are not equally trustworthy, and the difference matters:**
+`aef/` is built from the live site's own JS (`fields.js` + `funnel.js`) — same
+field names, same option values, same `validateStep()` semantics. A pass here
+is strong evidence the real thing will work.
 
-* `aef/` is built from the live site's own JS (`fields.js` + `funnel.js`) — same
-  field names, same option values, same `validateStep()` semantics. A pass here
-  is strong evidence the real thing will work.
-* `mlw/` is built from the live site's *observed DOM contract only* —
-  regenerated form id, `<button>` choices, platform `name` attributes. Its
-  option labels are the ones the filler assumes. A pass proves the filler's
-  mechanics; it does **not** prove the real site uses those labels.
-
-Both sheets ship with five synthetic sample rows covering different mapping
+The sheet ships with five synthetic sample rows covering different mapping
 branches (income and debt brackets, credit bands, pay frequencies, account
 types, homeowner/military flags). SSNs are in the 900-999 range the SSA never
 issues, phones use the 555-01xx block reserved for fiction, emails are
 `@example.com`, and routing numbers are real published bank ABAs because they
-must pass the checksum. **They are for the mocks — do not point them at a live
+must pass the checksum. **They are for the mock — do not point them at a live
 site.**
 
-Verified: AEF 5/5 Success against `aef/` (~72 s per lead); MLW 31/31 field
-values and all 23 steps against `mlw/`, with statuses written back to Sheet2.
+Verified: AEF 5/5 Success against `aef/` (~72 s per lead).
 
 ---
 
@@ -361,9 +226,6 @@ values and all 23 steps against `mlw/`, with statuses written back to Sheet2.
 | `GOOGLE_SHEET_URL` | — | Sheet URL or ID |
 | `GOOGLE_SHEET_WORKSHEET` | `Sheet1` | Tab name |
 | `SHEET_URL_AEF` / `SHEET_WS_AEF` | — | Per-offer override; blank falls back to the two above |
-| `SHEET_URL_MLW` / `SHEET_WS_MLW` | — | MyLendingWallet per-offer sheet override |
-| `SHEET_URL_LOW_CREDIT` / `SHEET_WS_LOW_CREDIT` | — | Low Credit Finance per-offer sheet override |
-| `SHEET_URL_CASHUSA` / `SHEET_WS_CASHUSA` | — | CashUSA per-offer sheet override |
 | `BROWSER_CHANNEL` | `chrome` | `chrome` \| `chromium` \| `msedge`. Bundled `chromium` crashes on this target |
 | `PROXY_SOURCE` | `file` | `file`, `env`, `rotating`, or `none` |
 | `PROXY_LIST` | — | Comma-separated proxies (source=env) |

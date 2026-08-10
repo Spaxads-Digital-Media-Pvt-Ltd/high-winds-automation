@@ -50,42 +50,6 @@ ALL_OFFERS: dict[str, dict] = {
         "sheet_ws_env":  "SHEET_WS_AEF",
         "enabled":       True,
     },
-    "my_lending_wallet": {
-        "name":          "MyLendingWallet",
-        "url":           "https://www.mylendingwallet.com/",
-        "filler":        "core.form_filler_mlw",
-        "color":         "#4ade80",
-        "sheet_url_env": "SHEET_URL_MLW",
-        "sheet_ws_env":  "SHEET_WS_MLW",
-        "enabled":       True,
-    },
-    "low_credit": {
-        "name":          "Low Credit Finance",
-        "url":           "https://lowcreditfinance.com/",
-        "filler":        "core.form_filler_lowcredit",
-        "color":         "#f472b6",
-        "sheet_url_env": "SHEET_URL_LOW_CREDIT",
-        "sheet_ws_env":  "SHEET_WS_LOW_CREDIT",
-        "enabled":       True,
-    },
-    "cashusa": {
-        "name":          "CashUSA",
-        "url":           "https://www.cashusa.com/get-started",
-        "filler":        "core.form_filler_cashusa",
-        "color":         "#fbbf24",
-        "sheet_url_env": "SHEET_URL_CASHUSA",
-        "sheet_ws_env":  "SHEET_WS_CASHUSA",
-        "enabled":       True,
-    },
-    "rightloansusa": {
-        "name":          "RightLoansUSA",
-        "url":           "https://www.rightloansusa.com/",
-        "filler":        "core.form_filler_rightloansusa",
-        "color":         "#a78bfa",
-        "sheet_url_env": "SHEET_URL_RIGHTLOANS",
-        "sheet_ws_env":  "SHEET_WS_RIGHTLOANS",
-        "enabled":       True,
-    },
 }
 
 # What the UI, the engines and the scheduler actually see.  Disabled offers are
@@ -855,7 +819,7 @@ _HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Lead Automation Engine</title>
+<title>Market Bullet Automation</title>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -1136,7 +1100,7 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
 <div class="wrap">
   <div class="header">
     <div>
-      <h1>Lead Automation Engine</h1>
+      <h1>Market Bullet Automation</h1>
       <p class="subtitle">Run multiple offers simultaneously — each card is fully independent.</p>
     </div>
     <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
@@ -1238,9 +1202,8 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
         <label class="fld-lbl">Browser per offer</label>
         <div class="hint" style="margin-bottom:8px">
           Choose the browser each offer opens in. Playwright's bundled
-          <b>Chromium</b> crashes on some offers' fraud-detection scripts
-          (American Emergency Fund, MyLendingWallet); stock <b>Google Chrome</b>
-          loads them cleanly. Low Credit Finance works on either.
+          <b>Chromium</b> crashes on American Emergency Fund's fraud-detection
+          script; stock <b>Google Chrome</b> loads the page cleanly.
         </div>
         <div id="br-offer-list"></div>
       </div>
@@ -2539,8 +2502,8 @@ if __name__ == "__main__":
     _setup_structlog()
     _load_persisted_jobs()
     threading.Thread(target=_scheduler_loop, daemon=True).start()
-    print("\n  Lead Automation UI  (multi-engine)")
-    print("  ──────────────────────────────────")
+    print("\n  Market Bullet Automation  (multi-engine)")
+    print("  ────────────────────────────────────────")
     print("  Open in browser:  http://localhost:5000\n")
     app.run(host="0.0.0.0", port=5000, debug=False,
             use_reloader=False, threaded=True)
