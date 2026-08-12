@@ -41,13 +41,13 @@ app = Flask(__name__)
 # circulation without deleting anything — its filler, sheet tab, .env keys and
 # mock all stay in place, and flipping the flag back brings it straight back.
 ALL_OFFERS: dict[str, dict] = {
-    "american_emergency_fund": {
-        "name":          "American Emergency Fund",
-        "url":           "https://www.americanemergencyfund.com/",
-        "filler":        "core.form_filler_aef",
-        "color":         "#38bdf8",
-        "sheet_url_env": "SHEET_URL_AEF",
-        "sheet_ws_env":  "SHEET_WS_AEF",
+    "simple_lending_direct": {
+        "name":          "Simple Lending Direct",
+        "url":           "https://simplelendingdirect.com/",
+        "filler":        "core.form_filler_simplelending",
+        "color":         "#facc15",
+        "sheet_url_env": "SHEET_URL_SLD",
+        "sheet_ws_env":  "SHEET_WS_SLD",
         "enabled":       True,
     },
 }

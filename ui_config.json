@@ -1,7 +1,5 @@
 {
-  "urls": {
-    "american_emergency_fund": "https://www.americanemergencyfund.com/"
-  },
+  "urls": {},
   "proxy": {
     "source": "rotating",
     "rotating_url": "http://zeeshan_aliak0_gmail_com:Leodigital0990-country-US@la.residential.rayobyte.com:8000",
@@ -11,8 +9,6 @@
   "browser": {
     "channel": "chrome",
     "headless": true,
-    "per_offer": {
-      "american_emergency_fund": "chrome"
-    }
+    "per_offer": {}
   }
 }

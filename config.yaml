@@ -4,11 +4,11 @@
 
 # --- Target Form ---
 target:
-  url: "https://www.americanemergencyfund.com/"  # Target URL
+  url: "https://simplelendingdirect.com/"  # Target URL
 
-  # Native Bootstrap wizard on the landing page (no iframe).  The step order is
-  # decided server-side per session, so core/form_filler_aef.py dispatches on the
-  # field names currently rendered rather than on a fixed step index.
+  # 'ef-' component wizard on the landing page (no iframe). Step order is
+  # fairly fixed but field-driven; core/form_filler_simplelending.py dispatches
+  # on the field/heading currently rendered rather than a fixed step index.
 
   # Timeout (seconds) to wait for navigation
   page_timeout: 60
