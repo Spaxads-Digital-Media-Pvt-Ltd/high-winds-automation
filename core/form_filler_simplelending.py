@@ -206,6 +206,19 @@ class FormFiller(BasePlatformFiller):
         seen: dict[str, int] = {}
         for step_num in range(self._max_steps):
             self._check_stop(stop_event)
+            # A mid-form navigation can fail (bad proxy exit IP, dropped
+            # connection) and land the browser on Chrome's own error page
+            # rather than the site. That page has genuinely-real DOM buttons
+            # ("Reload", "Details"), so the "no fields, no choice buttons ->
+            # must have reached post-offer" fallback a few lines down used to
+            # treat it as a completed submission instead of the failure it
+            # actually is.
+            if (page.url or "").startswith("chrome-error://"):
+                self._screenshot(page, row_number, f"nav_error_{step_num}")
+                raise FormFillerError(
+                    f"Navigation failed mid-form (step {step_num}) — landed on a "
+                    f"browser error page, not the site.", error_type="proxy_error",
+                )
             self._bypass_returning_applicant(page, row_number)
 
             names = self._visible_fields(page)
@@ -325,7 +338,9 @@ class FormFiller(BasePlatformFiller):
             try:
                 days = page.evaluate(
                     """() => Array.from(document.querySelectorAll('.ef-calendar__day-btn')).map(b => ({
-                        text: b.innerText.trim(), disabled: b.disabled
+                        text: b.innerText.trim(), disabled: b.disabled,
+                        attrs: Array.from(b.attributes).map(a => a.name + '=' + a.value).join(' '),
+                        parentAttrs: b.parentElement ? Array.from(b.parentElement.attributes).map(a => a.name + '=' + a.value).join(' ') : ''
                     }))"""
                 ) or []
             except Exception:
@@ -335,6 +350,11 @@ class FormFiller(BasePlatformFiller):
         if not days:
             self._screenshot(page, row_number, "no_calendar")
             raise FormFillerError("Next-payday calendar did not render", error_type="stuck")
+
+        log.info("form.payday_calendar_dump", row=row_number,
+                 cells=[{"text": d["text"], "disabled": d["disabled"],
+                         "attrs": d.get("attrs", ""), "parentAttrs": d.get("parentAttrs", "")}
+                        for d in days])
 
         idx = _pick_calendar_index(days, target_day)
 

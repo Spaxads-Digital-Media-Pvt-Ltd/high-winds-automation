@@ -63,29 +63,51 @@ def _target_day_from_raw(raw: str) -> int | None:
 
 
 def _pick_calendar_index(days: list[dict], target_day: int | None) -> int | None:
-    """Given `.ef-calendar__day-btn` cells (each {text, disabled}) and a
-    target day-of-month, return the index of the real current-month cell.
+    """Given `.ef-calendar__day-btn` cells (each {text, disabled, attrs}) and
+    a target day-of-month, return the index to click.
+
     Day numbers repeat (leading/trailing padding cells borrow the previous
-    and next month's 1-31 labels), so a plain text match is ambiguous; the
-    layout convention every such grid uses is: low day numbers (<=15) that
-    are padding sit at the very end, high day numbers (>15) that are padding
-    sit at the very start -- so the *first* occurrence of a low target day
-    and the *last* occurrence of a high one is the current month's real
-    cell."""
+    and next month's 1-31 labels), so a plain text match is ambiguous on its
+    own. But the real "today" cell carries its own distinct marker
+    (`ef-calendar__day-btn--is-today`, confirmed live) -- anchor on that and
+    every other cell's real date follows by its offset from today in this
+    sequential grid, no guessing required.
+
+    The enabled cells also turned out not to be "all future days": they're a
+    curated, non-contiguous set of actual offered payday dates (confirmed
+    live: 24-28 and 31-4 enabled, 29-30 not, in one real grid). A sheet's
+    exact target day is often simply not on offer, so a disabled exact match
+    falls back to the nearest *enabled* cell rather than failing the lead
+    over a day the site was never going to let us pick anyway."""
     if not days:
         return None
-    if target_day is None:
-        return next((i for i, d in enumerate(days)
-                     if not d["disabled"] and re.fullmatch(r"\d+( Today)?", d["text"])), None)
-    matches = [i for i, d in enumerate(days)
-               if re.match(rf"^{target_day}(\s|$)", d["text"])]
-    if not matches:
+
+    today_idx = next((i for i, d in enumerate(days)
+                       if "is-today" in (d.get("attrs") or "")), None)
+
+    exact_idx = None
+    if target_day is not None:
+        occurrences = [i for i, d in enumerate(days)
+                       if re.match(rf"^{target_day}(\s|$)", d["text"])]
+        if occurrences:
+            today_day = None
+            if today_idx is not None:
+                m = re.search(r"\d+", days[today_idx]["text"])
+                today_day = int(m.group()) if m else None
+            if today_day is not None:
+                estimate = today_idx + (target_day - today_day)
+                exact_idx = min(occurrences, key=lambda i: abs(i - estimate))
+            else:
+                exact_idx = occurrences[0] if target_day <= 15 else occurrences[-1]
+
+    if exact_idx is not None and not days[exact_idx]["disabled"]:
+        return exact_idx
+
+    enabled = [i for i, d in enumerate(days) if not d["disabled"]]
+    if not enabled:
         return None
-    idx = matches[0] if target_day <= 15 else matches[-1]
-    if days[idx]["disabled"]:
-        enabled = [i for i in matches if not days[i]["disabled"]]
-        idx = enabled[0] if enabled else idx
-    return idx
+    anchor = exact_idx if exact_idx is not None else (today_idx if today_idx is not None else 0)
+    return min(enabled, key=lambda i: abs(i - anchor))
 
 
 def _aba_checksum_ok(routing: str) -> bool:
@@ -615,12 +637,17 @@ class BasePlatformFiller:
     # Shared by AEF and MyLendingWallet — same lender-match back-end.
 
     # Still working ("Thank you for your request / Connecting with our network of
-    # trusted lenders") — wait, don't act.
+    # trusted lenders") — wait, don't act. The ef-platform family (SLD,
+    # ExaBucks, SimaCash) additionally shares "Do not close this window while
+    # we process your request... This will take 2-3 minutes" verbatim -- this
+    # used to live only in ExaBucks' own override, so SLD's real ~2-3 minute
+    # wait was never recognised as "still working" and got cut short by the
+    # generic idle timeout well before the site was actually done.
     _JS_POST_STATE = r"""() => {
         const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
         const t = e => (e.innerText || e.value || '').replace(/\s+/g, ' ').trim();
         const body = (document.body ? document.body.innerText : '').toLowerCase();
-        const processing = /(connecting with|trusted lenders|should only take|do not refresh|do not leave|please wait|one moment|processing your|matching you|finding you|searching for|finalis|finaliz)/.test(body);
+        const processing = /(connecting with|trusted lenders|should only take|do not refresh|do not leave|please wait|one moment|processing your|matching you|finding you|searching for|finalis|finaliz|do not close this window|process your request|this will take|will take \d|connected with one of our|authorized lenders|lender.network)/.test(body);
         const fields = Array.from(document.querySelectorAll('input,select,textarea'))
             .filter(e => vis(e) && e.type !== 'hidden' && !e.disabled && !e.readOnly)
             .map(e => (e.name || e.id || ''));
@@ -816,7 +843,7 @@ class BasePlatformFiller:
                     try:
                         cal_days = cur.evaluate(
                             """() => Array.from(document.querySelectorAll('.ef-calendar__day-btn')).map(b => ({
-                                text: b.innerText.trim(), disabled: b.disabled
+                                text: b.innerText.trim(), disabled: b.disabled, attrs: b.className
                             }))"""
                         ) or []
                     except Exception:
