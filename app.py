@@ -50,6 +50,29 @@ ALL_OFFERS: dict[str, dict] = {
         "sheet_ws_env":  "SHEET_WS_SLD",
         "enabled":       True,
     },
+    "exabucks": {
+        "name":          "ExaBucks",
+        "url":           "https://exabucks.com/form",
+        "filler":        "core.form_filler_exabucks",
+        "color":         "#4ade80",
+        "sheet_url_env": "SHEET_URL_EXABUCKS",
+        "sheet_ws_env":  "SHEET_WS_EXABUCKS",
+        "enabled":       True,
+    },
+    "simacash": {
+        "name":          "SimaCash",
+        # simacash.com itself Cloudflare-blocks direct hits (confirmed live);
+        # this affiliate tracking link is the entry point that was actually
+        # used for the sheet's historical Success rows -- it redirects into
+        # the real simacash.com wizard through a referrer/cookie chain
+        # Cloudflare accepts.
+        "url":           "https://digipalz.trackog.net/c?oid=34&affid=442",
+        "filler":        "core.form_filler_simacash",
+        "color":         "#f472b6",
+        "sheet_url_env": "SHEET_URL_SIMACASH",
+        "sheet_ws_env":  "SHEET_WS_SIMACASH",
+        "enabled":       True,
+    },
 }
 
 # What the UI, the engines and the scheduler actually see.  Disabled offers are
@@ -344,6 +367,14 @@ def _get_outbound_ip(proxy_url: str | None) -> str:
 def _setup_structlog() -> None:
     import structlog
 
+    # Every routed line also lands here, independent of the per-offer SSE
+    # queue -- the queue has exactly one reader's worth of capacity, so a
+    # second listener (a second browser tab, a diagnostic curl) steals lines
+    # from whichever UI is watching. This file is append-only and durable, so
+    # a run can be reviewed after the fact without racing anyone for it.
+    Path("logs").mkdir(parents=True, exist_ok=True)
+    _file_log = open("logs/automation.log", "a", buffering=1)
+
     def _routing_renderer(lgr, method, ev):
         offer_id = getattr(_tl, "offer_id", None)
         if offer_id:
@@ -360,7 +391,12 @@ def _setup_structlog() -> None:
                 for k, v in ev.items()
                 if k not in _skip and not k.startswith("_")
             ][:5]
-            _log(offer_id, f"{lvl}  {event}" + ("  " + "  ".join(parts) if parts else ""))
+            line = f"{lvl}  {event}" + ("  " + "  ".join(parts) if parts else "")
+            _log(offer_id, line)
+            try:
+                _file_log.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {offer_id}  {line}\n")
+            except Exception:
+                pass
         raise structlog.DropEvent()
 
     structlog.configure(

@@ -49,6 +49,10 @@ delays:
   max_action_delay: 1.8         # Max pause between form actions
   page_load_wait: 3             # Extra wait after page load
   pre_submit_wait: 1.5          # Pause before clicking submit
+  offer_load_wait: 20           # Settle time after following the post-offer
+                                 # redirect/new-tab, before the final screenshot
+                                 # and browser close (was defaulting to 6s,
+                                 # which caught some destination pages mid-load)
   # Human pacing for the browser filler (AEF):
   read_pause:  [0.5, 1.2]       # beat after a step renders — "reading the question"
   field_pause: [0.35, 0.8]      # beat between fields within a multi-field step

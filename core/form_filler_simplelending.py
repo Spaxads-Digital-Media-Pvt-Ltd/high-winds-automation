@@ -59,7 +59,7 @@ import time
 import structlog
 from playwright.sync_api import Page
 
-from core.lead_platform import BasePlatformFiller, FormFillerError
+from core.lead_platform import BasePlatformFiller, FormFillerError, _pick_calendar_index, _target_day_from_raw
 
 log = structlog.get_logger(__name__)
 
@@ -318,16 +318,7 @@ class FormFiller(BasePlatformFiller):
         that are padding sit at the very start — so the *first* occurrence of
         a low target day and the *last* occurrence of a high one is the
         current month's real cell."""
-        raw = self._raw(("Next Payday",))
-        target_day = None
-        if raw:
-            # "MM/DD/YYYY" -> day is the second number.
-            parts = re.findall(r"\d+", raw)
-            if len(parts) >= 2:
-                try:
-                    target_day = int(parts[1])
-                except ValueError:
-                    target_day = None
+        target_day = _target_day_from_raw(self._raw(("Next Payday",)))
         days: list[dict] = []
         deadline = time.time() + 8
         while time.time() < deadline and not days:
@@ -345,22 +336,7 @@ class FormFiller(BasePlatformFiller):
             self._screenshot(page, row_number, "no_calendar")
             raise FormFillerError("Next-payday calendar did not render", error_type="stuck")
 
-        if target_day is None:
-            # No usable sheet date -- take the first enabled day (soonest).
-            idx = next((i for i, d in enumerate(days)
-                        if not d["disabled"] and re.fullmatch(r"\d+( Today)?", d["text"])), None)
-        else:
-            matches = [i for i, d in enumerate(days)
-                       if re.match(rf"^{target_day}(\s|$)", d["text"])]
-            if not matches:
-                idx = None
-            elif target_day <= 15:
-                idx = matches[0]
-            else:
-                idx = matches[-1]
-            if idx is not None and days[idx]["disabled"]:
-                enabled = [i for i in matches if not days[i]["disabled"]]
-                idx = enabled[0] if enabled else idx
+        idx = _pick_calendar_index(days, target_day)
 
         if idx is None:
             self._screenshot(page, row_number, "payday_unmatched")

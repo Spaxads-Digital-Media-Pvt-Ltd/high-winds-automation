@@ -40,6 +40,54 @@ def _digits(raw: str) -> str:
     return re.sub(r"\D", "", raw or "")
 
 
+def _target_day_from_raw(raw: str) -> int | None:
+    """Extract the day-of-month from a sheet's "Next Payday" cell. Sheets have
+    used both "MM/DD/YYYY" and ISO "YYYY-MM-DD" for this column (confirmed:
+    the SimaCash tab is ISO), so this parses properly rather than assuming a
+    fixed position blindly picks the day out of either format."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%d/%m/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(raw, fmt).day
+        except ValueError:
+            continue
+    parts = re.findall(r"\d+", raw)
+    if len(parts) >= 2:
+        try:
+            return int(parts[1])
+        except ValueError:
+            pass
+    return None
+
+
+def _pick_calendar_index(days: list[dict], target_day: int | None) -> int | None:
+    """Given `.ef-calendar__day-btn` cells (each {text, disabled}) and a
+    target day-of-month, return the index of the real current-month cell.
+    Day numbers repeat (leading/trailing padding cells borrow the previous
+    and next month's 1-31 labels), so a plain text match is ambiguous; the
+    layout convention every such grid uses is: low day numbers (<=15) that
+    are padding sit at the very end, high day numbers (>15) that are padding
+    sit at the very start -- so the *first* occurrence of a low target day
+    and the *last* occurrence of a high one is the current month's real
+    cell."""
+    if not days:
+        return None
+    if target_day is None:
+        return next((i for i, d in enumerate(days)
+                     if not d["disabled"] and re.fullmatch(r"\d+( Today)?", d["text"])), None)
+    matches = [i for i, d in enumerate(days)
+               if re.match(rf"^{target_day}(\s|$)", d["text"])]
+    if not matches:
+        return None
+    idx = matches[0] if target_day <= 15 else matches[-1]
+    if days[idx]["disabled"]:
+        enabled = [i for i in matches if not days[i]["disabled"]]
+        idx = enabled[0] if enabled else idx
+    return idx
+
+
 def _aba_checksum_ok(routing: str) -> bool:
     """Both sites run this exact check client-side before they will advance."""
     if len(routing) != 9 or not routing.isdigit():
@@ -627,6 +675,44 @@ class BasePlatformFiller:
         return n;
     }"""
 
+    # A "verify your info before submitting" review screen (seen on the
+    # SimaCash/ef- platform under a "Welcome Back, <name>!" heading) carries
+    # its own separate, empty "Next Pay Date" field -- distinct from the one
+    # already filled earlier in the wizard. Left blank, the site rejects the
+    # submission client-side and clicking Request/Continue again is a no-op
+    # forever, which used to read as a silent, false "no further progress ->
+    # done" success. Opens the date picker if such a field is visible and
+    # empty; the calendar cell itself is clicked from Python (matching the
+    # day-selection heuristic _pick_payday already uses), not from here.
+    _JS_OPEN_PAYDATE_FIELD = r"""() => {
+        const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
+        const target = Array.from(document.querySelectorAll('input')).filter(vis).find(e => {
+            if (e.value && e.value.trim()) return false;
+            const lf = e.id ? document.querySelector('label[for="' + e.id + '"]') : null;
+            const wrap = e.closest('label');
+            const k = ((e.placeholder||'') + ' ' + (e.getAttribute('aria-label')||'') + ' ' +
+                       (e.name||'') + ' ' + (e.id||'') + ' ' +
+                       (lf ? lf.innerText : '') + ' ' + (wrap ? wrap.innerText : '')).toLowerCase();
+            return /next\s*pay|pay\s*date/.test(k);
+        });
+        if (!target) return false;
+        target.click();
+        return true;
+    }"""
+
+    # Every "still working" screen encountered on this platform family so far
+    # -- ExaBucks' own spinner, and the generic blue-ring one on whatever it
+    # hands off to next -- renders as a bare animated ring with no other
+    # content, so raw text length (dominated by each site's long, constant
+    # legal-disclaimer footer) never actually distinguishes "done loading"
+    # from "still spinning". Detect the spinner itself instead.
+    _JS_STILL_LOADING = r"""() => {
+        const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
+        return !!Array.from(document.querySelectorAll(
+                '[class*=spinner],[class*=loading],[class*=loader],[aria-busy="true"],svg circle'))
+            .find(vis);
+    }"""
+
     # Find a Continue / Accept-style button (never Back / Decline / Cancel).
     # dryRun=true returns its text without clicking, so the caller can arm a
     # popup listener before the real click.
@@ -716,6 +802,41 @@ class BasePlatformFiller:
                 last_progress = time.time()
                 time.sleep(1)
 
+            # 1b) A review screen's own "Next Pay Date" field, if present and
+            # still empty -- see _JS_OPEN_PAYDATE_FIELD's docstring.
+            try:
+                opened = cur.evaluate(self._JS_OPEN_PAYDATE_FIELD)
+            except Exception:
+                opened = False
+            if opened:
+                target_day = _target_day_from_raw(self._raw(("Next Payday",)))
+                cal_days: list[dict] = []
+                deadline_cal = time.time() + 5
+                while time.time() < deadline_cal and not cal_days:
+                    try:
+                        cal_days = cur.evaluate(
+                            """() => Array.from(document.querySelectorAll('.ef-calendar__day-btn')).map(b => ({
+                                text: b.innerText.trim(), disabled: b.disabled
+                            }))"""
+                        ) or []
+                    except Exception:
+                        cal_days = []
+                    if not cal_days:
+                        time.sleep(0.5)
+                idx = _pick_calendar_index(cal_days, target_day)
+                if idx is not None:
+                    try:
+                        cur.locator(".ef-calendar__day-btn").nth(idx).click()
+                        log.info("form.post_offer_payday_picked", day=target_day,
+                                 cell=cal_days[idx]["text"], row=row_number)
+                        last_progress = time.time()
+                        time.sleep(1)
+                    except Exception as e:
+                        log.warning("form.post_offer_payday_click_failed", error=str(e)[:80], row=row_number)
+                else:
+                    log.warning("form.post_offer_payday_unmatched", target=target_day,
+                                 options=[d["text"] for d in cal_days], row=row_number)
+
             # 2) A Continue / View / "Start Here!" CTA (searched across frames).
             cta_fr, cta = (_find_cta() if clicks < max_clicks else (None, ""))
             if cta_fr is not None:
@@ -762,7 +883,7 @@ class BasePlatformFiller:
                             cur.wait_for_load_state(state, timeout=15000)
                         except Exception:
                             pass
-                    log.info("form.post_offer_loaded", url=(cur.url or "")[:80], row=row_number)
+                    log.info("form.post_offer_tab_settled", url=(cur.url or "")[:80], row=row_number)
                     break
                 # In-place navigation (a Continue/Submit on the aggregator) —
                 # wait for it and keep going through the flow.
@@ -780,6 +901,14 @@ class BasePlatformFiller:
                 if time.time() - proc_logged > 15:
                     log.info("form.post_offer_processing", row=row_number)
                     proc_logged = time.time()
+                # Keep resetting the idle clock while we can see it's actively
+                # working -- otherwise last_progress stays frozen at the last
+                # click, so the moment "processing" text disappears the idle
+                # timeout has usually already elapsed and the very next
+                # iteration bails before the page's real content/CTA (which
+                # is presumably what replaces the "processing" copy) ever gets
+                # a fair chance to render and be found by _find_cta().
+                last_progress = time.time()
                 time.sleep(3)
                 continue
 
@@ -789,6 +918,40 @@ class BasePlatformFiller:
                 break
             time.sleep(2)
 
+        # Regardless of which exit path was taken (new-tab settle, no-progress,
+        # idle timeout, or deadline): raw text length is a false signal here --
+        # every one of these sites carries a long boilerplate legal-disclaimer
+        # footer, so a page showing nothing but a loading spinner still reports
+        # a large text_len and used to read as "real content arrived". Poll for
+        # the spinner itself to actually clear (bounded, so a genuinely-blank
+        # destination doesn't hang), then log what we landed on either way so a
+        # bad result is diagnosable instead of silently called done.
+        still_loading = True
+        for _ in range(10):  # ~10s, in ~1s steps
+            try:
+                still_loading = bool(cur.evaluate(self._JS_STILL_LOADING))
+            except Exception:
+                still_loading = False
+            if not still_loading:
+                break
+            time.sleep(1)
+        try:
+            final_text_len = cur.evaluate(
+                "() => (document.body ? document.body.innerText : '').trim().length"
+            )
+        except Exception:
+            final_text_len = 0
+        try:
+            final_title = cur.title()
+        except Exception:
+            final_title = ""
+        log.info("form.post_offer_exit", url=(cur.url or "")[:80],
+                 title=final_title[:60], text_len=final_text_len,
+                 still_loading=still_loading, row=row_number)
+        try:
+            self._live(cur)
+        except Exception:
+            pass
         self._screenshot(cur, row_number, "post_offer_final")
         log.info("form.post_offer_done", clicks=clicks, row=row_number)
 
