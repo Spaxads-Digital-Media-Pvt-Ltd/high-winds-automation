@@ -1,10 +1,13 @@
 {
   "urls": {
-    "american_emergency_fund": "https://www.americanemergencyfund.com/"
+    "simple_lending_direct": "https://get.offer.crazeadsmedia.com/6a980f48cbe584f8ab647a13?sub1={{ad.id}}&sub2={{adset.id}}&sub3={{campaign.id}}&sub4={{ad.name}}&sub5={{adset.name}}&sub6={{campaign.name}}&sub7={{placement}}&sub8={{site_source_name}}&utm_source=facebook&utm_medium=paid",
+    "exabucks": "https://digipalz.trackog.net/c?oid=44&affid=442",
+    "simacash": "https://digipalz.trackog.net/c?oid=34&affid=442",
+    "happy_loans": "https://www.happyloans.net/submit-loan-request.php"
   },
   "proxy": {
     "source": "rotating",
-    "rotating_url": "http://zeeshan_aliak0_gmail_com:Leodigital0990-country-US@la.residential.rayobyte.com:8000",
+    "rotating_url": "http://pf-owovbdxcpwxg_area-US:43czqgMzW93ySL25@proxy.proxy4free.net:1000",
     "env_list": "http://user:pass@proxy1.example.com:8080,socks5://user:pass@proxy2.example.com:1080"
   },
   "scheduled_jobs": [],
@@ -12,7 +15,10 @@
     "channel": "chrome",
     "headless": true,
     "per_offer": {
-      "american_emergency_fund": "chrome"
+      "exabucks": "chromium",
+      "happy_loans": "chromium",
+      "simacash": "chromium",
+      "simple_lending_direct": "chromium"
     }
   }
 }

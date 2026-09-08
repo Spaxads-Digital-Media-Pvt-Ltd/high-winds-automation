@@ -41,22 +41,82 @@ app = Flask(__name__)
 # circulation without deleting anything — its filler, sheet tab, .env keys and
 # mock all stay in place, and flipping the flag back brings it straight back.
 ALL_OFFERS: dict[str, dict] = {
-    "american_emergency_fund": {
-        "name":          "American Emergency Fund",
-        "url":           "https://www.americanemergencyfund.com/",
-        "filler":        "core.form_filler_aef",
-        "color":         "#38bdf8",
-        "sheet_url_env": "SHEET_URL_AEF",
-        "sheet_ws_env":  "SHEET_WS_AEF",
+    "simple_lending_direct": {
+        "name":          "Simple Lending Direct",
+        "url":           "https://simplelendingdirect.com/",
+        "filler":        "core.form_filler_simplelending",
+        "color":         "#facc15",
+        "sheet_url_env": "SHEET_URL_SLD",
+        "sheet_ws_env":  "SHEET_WS_SLD",
+        "group":         "high_winds",
+        "enabled":       True,
+    },
+    "exabucks": {
+        "name":          "ExaBucks",
+        "url":           "https://exabucks.com/form",
+        "filler":        "core.form_filler_exabucks",
+        "color":         "#1dbf25",
+        "sheet_url_env": "SHEET_URL_EXABUCKS",
+        "sheet_ws_env":  "SHEET_WS_EXABUCKS",
+        "group":         "high_winds",
+        "enabled":       True,
+    },
+    "simacash": {
+        "name":          "SimaCash",
+        "url":           "https://simacash.com/form",
+        "filler":        "core.form_filler_simacash",
+        "color":         "#f472b6",
+        "sheet_url_env": "SHEET_URL_SIMACASH",
+        "sheet_ws_env":  "SHEET_WS_SIMACASH",
+        "group":         "high_winds",
+        "enabled":       True,
+    },
+    "happy_loans": {
+        "name":          "Happy Loans",
+        "url":           "https://www.happyloans.net/submit-loan-request.php",
+        "filler":        "core.form_filler_happyloans",
+        "color":         "#fb923c",
+        "sheet_url_env": "SHEET_URL_HAPPYLOANS",
+        "sheet_ws_env":  "SHEET_WS_HAPPYLOANS",
+        # Explicit tab name — sheet was renamed from "High Loans" to "happy loans".
+        # Prefer this so a stale Flask process / old env cannot reopen the missing tab.
+        "sheet_ws":      "happy loans",
+        "group":         "round_sky",
         "enabled":       True,
     },
 }
+
+# Flask UI sections. Keys must match ALL_OFFERS. Unknown/disabled keys are skipped.
+OFFER_GROUP_DEFS: list[dict] = [
+    {"id": "high_winds", "name": "High Winds Automation"},
+    {"id": "round_sky", "name": "Round Sky"},
+]
 
 # What the UI, the engines and the scheduler actually see.  Disabled offers are
 # absent from here, so no card, route, engine or job can reference them.
 OFFERS: dict[str, dict] = {
     oid: o for oid, o in ALL_OFFERS.items() if o.get("enabled", True)
 }
+
+
+def _offer_groups_view() -> list[dict]:
+    """Enabled offers, grouped for the Flask cards."""
+    by_group: dict[str, list[str]] = {}
+    for oid, o in OFFERS.items():
+        by_group.setdefault(o.get("group") or "other", []).append(oid)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for g in OFFER_GROUP_DEFS:
+        keys = by_group.get(g["id"]) or []
+        if not keys:
+            continue
+        out.append({"id": g["id"], "name": g["name"], "offer_ids": keys})
+        seen.add(g["id"])
+    for gid, keys in by_group.items():
+        if gid in seen:
+            continue
+        out.append({"id": gid, "name": gid.replace("_", " ").title(), "offer_ids": keys})
+    return out
 
 # Pristine defaults — captured before any saved overrides are applied so the
 # UI "reset to default" can restore them.
@@ -386,9 +446,21 @@ def _kill_browser(offer_id: str) -> None:
     level: killing the process makes the in-flight Playwright call raise at once.
     Matched by the per-offer marker flag, so it never touches another offer's
     browser."""
+    tag = _browser_tag(offer_id)
     try:
-        subprocess.run(["pkill", "-9", "-f", _browser_tag(offer_id)],
-                       capture_output=True, timeout=10)
+        if os.name == "nt":
+            ps = (
+                "Get-CimInstance Win32_Process | "
+                f"Where-Object {{ $_.CommandLine -and $_.CommandLine -like '*{tag}*' }} | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps],
+                capture_output=True, timeout=15,
+            )
+        else:
+            subprocess.run(["pkill", "-9", "-f", tag],
+                           capture_output=True, timeout=10)
     except Exception as e:
         _log(offer_id, f"WARN  Browser force-kill failed: {type(e).__name__}: {e}")
 
@@ -421,6 +493,21 @@ def _run_engine(offer_id: str, target_url: str) -> None:
     try:
         filler_module_path = OFFERS[offer_id]["filler"]
         try:
+            # Reload the shared platform + 247 follow-up first so Start picks
+            # up those edits without restarting Flask; then the offer filler.
+            for _dep in (
+                "core.lead_platform",
+                "core.form_filler_247lending",
+                "core.form_filler_simplelending",
+                "core.form_filler_ef_hosted",
+                "core.form_filler_happyloans",
+            ):
+                if _dep == filler_module_path:
+                    continue
+                try:
+                    importlib.reload(importlib.import_module(_dep))
+                except Exception:
+                    pass
             mod = importlib.import_module(filler_module_path)
             # Reload so edits to the filler take effect on the next Start
             # without restarting the whole Flask process (import_module would
@@ -466,12 +553,21 @@ def _run_engine(offer_id: str, target_url: str) -> None:
         url_env = offer_cfg.get("sheet_url_env", "")
         ws_env  = offer_cfg.get("sheet_ws_env",  "")
         sheet_url      = os.getenv(url_env, "") or os.getenv("GOOGLE_SHEET_URL", "")
-        worksheet_name = os.getenv(ws_env, "")  or os.getenv("GOOGLE_SHEET_WORKSHEET", "Sheet1")
+        # Offer-level sheet_ws wins (Happy Loans -> "happy loans"). Other offers
+        # keep env / GOOGLE_SHEET_WORKSHEET fallbacks unchanged.
+        worksheet_name = (
+            offer_cfg.get("sheet_ws")
+            or os.getenv(ws_env, "")
+            or os.getenv("GOOGLE_SHEET_WORKSHEET", "Sheet1")
+        )
 
         _log(offer_id, f"INFO  Target -> {target_url}")
+        _log(offer_id, f"INFO  Sheet tab -> {worksheet_name}")
         _log(offer_id, "INFO  Connecting to Google Sheets...")
 
-        from utils.sheet_handler import SheetHandler
+        from utils import sheet_handler as _sheet_mod
+        importlib.reload(_sheet_mod)
+        SheetHandler = _sheet_mod.SheetHandler
         from utils.proxy_manager import ProxyManager
         from utils.device_manager import DeviceManager
 
@@ -523,7 +619,10 @@ def _run_engine(offer_id: str, target_url: str) -> None:
             sheet.mark_in_progress(row_num)
 
             rc_col = config.get("sheet_columns", {}).get("retry_count", "Retry_Count")
-            retry_count = int(row.get(rc_col, 0) or 0)
+            try:
+                retry_count = int(str(row.get(rc_col, 0) or 0).strip() or 0)
+            except (TypeError, ValueError):
+                retry_count = 0
             attempt = 0
             success = False
             paced_success = False
@@ -568,7 +667,26 @@ def _run_engine(offer_id: str, target_url: str) -> None:
                     paced_success = True
                     _log(offer_id, f"OK    Row {row_num} -> Success")
 
-                except FormFillerError as e:
+                except Exception as e:
+                    # Reload of filler modules can change FormFillerError's class
+                    # identity, so match on error_type rather than isinstance.
+                    if not getattr(e, "error_type", None):
+                        if stop_event.is_set():
+                            sheet.update_row(row_num, status="Stopped",
+                                             notes="[stopped] Run stopped by user",
+                                             proxy_used=proxy_display, ip=proxy_ip,
+                                             retry_count=retry_count + attempt)
+                            _log(offer_id, f"INFO  Row {row_num} -> Stopped")
+                            break
+                        sheet.update_row(row_num, status="Failed",
+                                         notes=f"[unexpected] {e}",
+                                         proxy_used=proxy_display, ip=proxy_ip,
+                                         retry_count=retry_count + attempt)
+                        eng["stats"]["failed"]    += 1
+                        eng["stats"]["processed"] += 1
+                        _log(offer_id, f"ERR   Row {row_num} -> Unexpected: {e}")
+                        break
+
                     # A Stop mid-attempt force-kills the browser, so process_row
                     # can surface as any error type (browser_closed / timeout /
                     # unknown).  Treat *any* failure while stopping as a clean
@@ -631,23 +749,6 @@ def _run_engine(offer_id: str, target_url: str) -> None:
                             if stop_event.is_set():
                                 break
                             time.sleep(1)
-
-                except Exception as e:
-                    if stop_event.is_set():
-                        sheet.update_row(row_num, status="Stopped",
-                                         notes="[stopped] Run stopped by user",
-                                         proxy_used=proxy_display, ip=proxy_ip,
-                                         retry_count=retry_count + attempt)
-                        _log(offer_id, f"INFO  Row {row_num} -> Stopped")
-                        break
-                    sheet.update_row(row_num, status="Failed",
-                                     notes=f"[unexpected] {e}",
-                                     proxy_used=proxy_display, ip=proxy_ip,
-                                     retry_count=retry_count + attempt)
-                    eng["stats"]["failed"]    += 1
-                    eng["stats"]["processed"] += 1
-                    _log(offer_id, f"ERR   Row {row_num} -> Unexpected: {e}")
-                    break
 
             # Paced mode: record the completed lead against its release hour.
             if rel_dt is not None and _active_pacer is not None:
@@ -842,6 +943,19 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
 .stop-all:hover { background: #991b1b; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+.offer-group { margin-bottom: 28px; }
+.group-head {
+  display: flex; align-items: center; gap: 12px;
+  margin: 0 2px 12px;
+}
+.group-num {
+  width: 28px; height: 28px; border-radius: 8px;
+  background: #1a2d47; border: 1px solid #1e40af;
+  color: #7dd3fc; font-weight: 800; font-size: .9rem;
+  display: flex; align-items: center; justify-content: center;
+}
+.group-name { font-size: 1.02rem; font-weight: 700; color: #e2e8f0; }
+.group-sub { font-size: .68rem; color: #64748b; margin-top: 1px; }
 .card {
   background: #131926; border: 2px solid #1e2d40;
   border-radius: 12px; overflow: hidden;
@@ -1100,8 +1214,8 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
 <div class="wrap">
   <div class="header">
     <div>
-      <h1>High Winds Automation</h1>
-      <p class="subtitle">Run multiple offers simultaneously — each card is fully independent.</p>
+      <h1>Lead Automation</h1>
+      <p class="subtitle">High Winds Automation and Round Sky — each card is fully independent.</p>
     </div>
     <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
       <div class="us-clock" id="us-clock" title="Current US Eastern Time (America/New_York)">
@@ -1114,8 +1228,18 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
     </div>
   </div>
 
-  <div class="grid">
-    {% for key, offer in offers.items() %}
+  {% for group in offer_groups %}
+  <div class="offer-group">
+    <div class="group-head">
+      <span class="group-num">{{ loop.index }}</span>
+      <div>
+        <div class="group-name">{{ group.name }}</div>
+        <div class="group-sub">{{ group.offer_ids|length }} offer{% if group.offer_ids|length != 1 %}s{% endif %}</div>
+      </div>
+    </div>
+    <div class="grid">
+    {% for key in group.offer_ids %}
+    {% set offer = offers[key] %}
     <div class="card" id="card-{{ key }}">
       <div class="card-head">
         <div class="name-row">
@@ -1163,7 +1287,9 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
       </div>
     </div>
     {% endfor %}
+    </div>
   </div>
+  {% endfor %}
 
   <div class="jobs-panel" id="jobs-panel" style="display:none">
     <div class="jobs-title">&#9201; Scheduled Jobs</div>
@@ -1202,8 +1328,8 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
         <label class="fld-lbl">Browser per offer</label>
         <div class="hint" style="margin-bottom:8px">
           Choose the browser each offer opens in. Playwright's bundled
-          <b>Chromium</b> crashes on American Emergency Fund's fraud-detection
-          script; stock <b>Google Chrome</b> loads the page cleanly.
+          <b>Chromium</b> can crash on these offers' fraud-detection
+          scripts; stock <b>Google Chrome</b> loads the page cleanly.
         </div>
         <div id="br-offer-list"></div>
       </div>
@@ -2050,7 +2176,12 @@ document.getElementById('settings-modal').addEventListener('click', e => {
 
 @app.route("/")
 def index():
-    return render_template_string(_HTML, offers=OFFERS, offer_keys=list(OFFERS.keys()))
+    return render_template_string(
+        _HTML,
+        offers=OFFERS,
+        offer_keys=list(OFFERS.keys()),
+        offer_groups=_offer_groups_view(),
+    )
 
 
 @app.route("/start/<offer_id>", methods=["POST"])
@@ -2502,8 +2633,9 @@ if __name__ == "__main__":
     _setup_structlog()
     _load_persisted_jobs()
     threading.Thread(target=_scheduler_loop, daemon=True).start()
+    port = int(os.getenv("PORT", "5000"))
     print("\n  High Winds Automation  (multi-engine)")
-    print("  ────────────────────────────────────────")
-    print("  Open in browser:  http://localhost:5000\n")
-    app.run(host="0.0.0.0", port=5000, debug=False,
+    print("  ----------------------------------------")
+    print(f"  Open in browser:  http://localhost:{port}\n")
+    app.run(host="0.0.0.0", port=port, debug=False,
             use_reloader=False, threaded=True)

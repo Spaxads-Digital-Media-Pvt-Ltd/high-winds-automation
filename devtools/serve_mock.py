@@ -1,18 +1,9 @@
 #!/usr/bin/env python3
 """
-devtools/serve_mock.py — local stand-in for the offer form.
+devtools/serve_mock.py — local stand-in for offer forms.
 
-Serves devtools/mock_offer/:
-
-    http://127.0.0.1:8799/aef/index.html   American Emergency Fund
-
-Point Settings -> Target URLs at it and press Start.  The whole pipeline runs —
-sheet read, engine, retries, live preview, status write-back — without sending
-anything to the real advertiser.
-
-  aef/  Built from the live site's own JS (template/8735/js/fields.js +
-        funnel.js): same field names, same option values, same required-field
-        semantics as its validateStep().  A pass here is strong evidence.
+Serves whatever is under devtools/mock_offer/ so Settings -> Target URLs
+can point at a local page instead of a live advertiser.
 
 Nothing is stored and nothing leaves your machine.
 """
@@ -37,9 +28,9 @@ def main() -> None:
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("127.0.0.1", args.port), handler) as httpd:
         base = f"http://127.0.0.1:{args.port}"
-        print("\n  Mock offer form running:")
-        print(f"    American Emergency Fund   {base}/aef/index.html")
-        print("\n  Point Settings -> Target URLs at it, then Start.")
+        print("\n  Mock offer server running:")
+        print(f"    {base}/")
+        print("\n  Point Settings -> Target URLs at a page under this root, then Start.")
         print("  Ctrl-C to stop.\n")
         try:
             httpd.serve_forever()

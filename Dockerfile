@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 # Chrome as well as Chromium: the bundled Chromium build crashes its renderer on
 # the target offer's fraud-detection script, while stock Chrome loads it fine.
-# core/form_filler_aef.py launches BROWSER_CHANNEL=chrome by default.
+# core/lead_platform.py launches BROWSER_CHANNEL=chrome by default.
 RUN pip install --no-cache-dir -r requirements.txt \
  && playwright install chromium --with-deps \
  && playwright install chrome --with-deps
