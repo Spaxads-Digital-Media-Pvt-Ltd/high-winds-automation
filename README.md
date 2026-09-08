@@ -3,18 +3,20 @@
 Reads leads from Google Sheets, rotates proxy + device fingerprint per attempt,
 fills a loan application via Playwright, and writes the result back to the sheet.
 
-One offer:
+Three offers:
 
 | Offer | Front-end | Sheet tab | Filler |
 |-------|-----------|-----------|--------|
-| American Emergency Fund | server-rendered Bootstrap wizard | `American Emergency Fund` | `form_filler_aef` (shared platform) |
+| Simple Lending Direct | `ef-` wizard on the homepage | `Simple Lending Direct` | `form_filler_simplelending` |
+| ExaBucks | same widget on `/form` | `ExaBucks` | `form_filler_exabucks` |
+| SimaCash | same widget on `/form` | `SimaCash` | `form_filler_simacash` |
 
 Each offer carries an `enabled` flag in `ALL_OFFERS` ([app.py](app.py)); setting
 it to `False` takes an offer out of the UI without deleting anything.
 
 `core/lead_platform.py` holds the platform layer — the 31-field vocabulary,
 sheet parsing, value mapping and validation, and the browser lifecycle — and
-`form_filler_aef` subclasses it with only the site's own DOM layer. Additional
+each offer's filler subclasses it with only the site's own DOM layer. Additional
 offers plug in the same way: a filler that is interface-compatible with the
 engine (same `FormFiller`/`FormFillerError`/`process_row` contract) plus one
 entry in `ALL_OFFERS`.
@@ -39,8 +41,10 @@ lead-automation/
 │   ├── stealth.py          # Anti-detection JS patches + human-like helpers
 │   └── lead_pacer.py       # Hour-by-hour lead release scheduler
 ├── core/
-│   ├── lead_platform.py    # shared platform layer (parsing, mapping, browser lifecycle)
-│   └── form_filler_aef.py  # americanemergencyfund.com — Bootstrap wizard DOM
+│   ├── lead_platform.py              # shared platform layer
+│   ├── form_filler_simplelending.py  # simplelendingdirect.com
+│   ├── form_filler_exabucks.py       # exabucks.com/form
+│   └── form_filler_simacash.py       # simacash.com/form
 ├── logs/                   # Structured log files (git-ignored)
 └── screenshots/            # Live preview + failure captures (git-ignored)
 ```
@@ -121,25 +125,15 @@ provisioned sheet already has this formatting applied.
 
 ## 🎯 The Target Form
 
-`americanemergencyfund.com` serves a native Bootstrap 5 wizard on the landing
-page — no iframe. One step renders at a time inside `#applicantForm`, advanced
-by `#nextBtn` (which becomes "Request Loan" on the last step).
+Simple Lending Direct, ExaBucks and SimaCash all load the same `ef-` widget
+(`dynamicformrequest.com/form-loader.js` into `#ef-container`). SLD embeds it
+on the homepage; ExaBucks and SimaCash host it at `/form`.
 
-**Step order is decided server-side per session.** The page injects a
-`missingFields` array; only steps carrying a still-missing field are displayed.
-A returning applicant or a post-validation retry therefore sees a shorter,
-different sequence. `core/form_filler_aef.py` is written accordingly: each
-iteration reads the field names currently rendered and dispatches on those, so
-any order works and skipped or repeated steps are handled naturally. Adding a
-new step means adding one entry to the handler map.
-
-Full field/value reference is in the module docstring of
-[`core/form_filler_aef.py`](core/form_filler_aef.py).
-
-**Completion** is detected by URL: `/?cmd=RenderResult&uuid=…` (approved, or
-declined with offers) or a redirect to `offer.requestedresults.com` (declined /
-rejected / processing error). Both are recorded as delivered, with the specific
-outcome written to the sheet's `Notes` column.
+Each filler dispatches on the field names and chip headings currently
+rendered, so skipped or reordered steps are handled naturally. Completion
+routes into the shared lender-match chase in `core/lead_platform.py`.
+Both approved and declined outcomes are recorded as delivered, with the
+specific result written to the sheet's `Notes` column.
 
 ---
 
@@ -177,32 +171,11 @@ If the browser crashes anyway, the lead fails with `browser_crashed` /
 ## 🧪 Testing Without Submitting Real Applications
 
 Rows land in the sheet as **Pending**, so pressing Start submits them as real
-loan applications. To exercise the pipeline without that, run the bundled mock:
-
-```bash
-python devtools/serve_mock.py
-```
-
-| Offer | Mock URL |
-|-------|----------|
-| American Emergency Fund | `http://127.0.0.1:8799/aef/index.html` |
-
-Set **Settings → Target URLs** to it and press Start. Everything else is real:
-sheet read, engine, retries, live preview, status write-back.
-
-`aef/` is built from the live site's own JS (`fields.js` + `funnel.js`) — same
-field names, same option values, same `validateStep()` semantics. A pass here
-is strong evidence the real thing will work.
-
-The sheet ships with five synthetic sample rows covering different mapping
-branches (income and debt brackets, credit bands, pay frequencies, account
-types, homeowner/military flags). SSNs are in the 900-999 range the SSA never
-issues, phones use the 555-01xx block reserved for fiction, emails are
-`@example.com`, and routing numbers are real published bank ABAs because they
-must pass the checksum. **They are for the mock — do not point them at a live
-site.**
-
-Verified: AEF 5/5 Success against `aef/` (~72 s per lead).
+loan applications. Use a small synthetic batch (SSNs in the 900-999 range the
+SSA never issues, phones in the 555-01xx fiction block, `@example.com` emails,
+and published bank ABAs that pass the checksum) if you only want to exercise
+the pipeline. **Do not point those rows at a live site unless you intend to
+submit them.**
 
 ---
 
@@ -225,7 +198,10 @@ Verified: AEF 5/5 Success against `aef/` (~72 s per lead).
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | `credentials/credentials.json` | SA key path |
 | `GOOGLE_SHEET_URL` | — | Sheet URL or ID |
 | `GOOGLE_SHEET_WORKSHEET` | `Sheet1` | Tab name |
-| `SHEET_URL_AEF` / `SHEET_WS_AEF` | — | Per-offer override; blank falls back to the two above |
+| `SHEET_URL_SLD` / `SHEET_WS_SLD` | — | Simple Lending Direct sheet override |
+| `SHEET_URL_EXABUCKS` / `SHEET_WS_EXABUCKS` | — | ExaBucks sheet override |
+| `SHEET_URL_SIMACASH` / `SHEET_WS_SIMACASH` | — | SimaCash sheet override |
+| `SHEET_URL_HAPPYLOANS` / `SHEET_WS_HAPPYLOANS` | — | Happy Loans (Round Sky) tab, named **happy loans** |
 | `BROWSER_CHANNEL` | `chrome` | `chrome` \| `chromium` \| `msedge`. Bundled `chromium` crashes on this target |
 | `PROXY_SOURCE` | `file` | `file`, `env`, `rotating`, or `none` |
 | `PROXY_LIST` | — | Comma-separated proxies (source=env) |

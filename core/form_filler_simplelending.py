@@ -2,11 +2,10 @@
 core/form_filler_simplelending.py — simplelendingdirect.com multi-step form
 automation.
 
-Same lead-platform family as americanemergencyfund.com (identical wizard
+Same lead-platform family as ExaBucks and SimaCash (identical wizard
 copy — "What Is Your Email Address? We use your email to send request
-updates and connect you with lenders" is verbatim shared text), but skinned
-with different markup: no #applicantForm/#nextBtn wrapper, plain page-level
-inputs (name="email", name="firstName", …) and an "ef-" component library
+updates and connect you with lenders" is verbatim shared text), skinned
+with an "ef-" component library
 (ef-btn, ef-nav__btn--next, ef-input-wrapper, …).
 
 Live-confirmed step order (landing -> wizard), walked end-to-end against the
@@ -40,7 +39,7 @@ development):
 
 A "Welcome Back, <name>!" screen can interrupt at any point once a phone
 number the platform has already seen is entered (returning-applicant
-recognition, same idea as AEF); "Continue filling full form" bypasses it.
+recognition); "Continue filling full form" bypasses it.
 
 Anything this filler doesn't recognise raises a clear ``unhandled_step`` /
 ``field_rejected`` error (with a screenshot), so a real run's log pinpoints
@@ -49,12 +48,15 @@ exactly what to extend rather than silently guessing. See
 
 Completion routes into the shared lender-match flow (`_handle_post_offer`
 in core/lead_platform.py) — the same "Continue" chase across popups / new
-tabs / in-place navigation used by AEF and MyLendingWallet.
+tabs / in-place navigation used by ExaBucks and SimaCash. When that flow
+lands on 247LendingGroup.com, the second apply form is filled and submitted
+from the same sheet row (`core/form_filler_247lending.py`).
 """
 from __future__ import annotations
 
 import re
 import time
+from datetime import date, timedelta
 
 import structlog
 from playwright.sync_api import Page
@@ -86,6 +88,7 @@ _TEXT_FIELD_MAP: list[tuple[re.Pattern, str]] = [
     (re.compile(r"bank.?name", re.I), "bank_name"),
     (re.compile(r"account.?type", re.I), "account_type"),
     (re.compile(r"account", re.I), "account_number"),
+    (re.compile(r"next.?pay|pay.?date|payday", re.I), "next_payday"),
     (re.compile(r"loan.?amount|amount", re.I), "loan_amount"),
 ]
 
@@ -111,8 +114,16 @@ _CATEGORY_HEADING_MAP: list[tuple[re.Pattern, tuple[str, ...]]] = [
 # Credit (639 or less)").
 _CATEGORY_SYNONYMS = {
     "poor": "bad", "terrible": "bad", "awful": "bad", "below": "bad",
-    "great": "excellent", "employed": "employment",
+    "great": "excellent", "employed": "employment", "employment": "employed",
 }
+
+# Sheet wording -> form chip text for "How Often You Get Paid?"
+_PAY_FREQ_ALIASES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"bi[- ]?week|every\s*(2|two)\s*weeks?", re.I), "Biweekly"),
+    (re.compile(r"semi[- ]?month|twice\s*(a|/)?\s*month|twice\s*monthly", re.I), "Semimonthly"),
+    (re.compile(r"week", re.I), "Weekly"),
+    (re.compile(r"month", re.I), "Monthly"),
+]
 
 # A button matching one of these is the platform's own designated catch-all
 # for "none of the specific options fit" -- safe to use as a last resort
@@ -168,7 +179,7 @@ _HEADING_JS = """() => {
 
 class FormFiller(BasePlatformFiller):
     """simplelendingdirect.com — 'ef-' component wizard, same platform family
-    as AEF (shared copy, shared lender-match post-offer flow)."""
+    as ExaBucks and SimaCash. Congratulations / submitted = Success; no 247 wait."""
 
     default_url = "https://simplelendingdirect.com/"
 
@@ -176,7 +187,7 @@ class FormFiller(BasePlatformFiller):
     # copy), which the shared _JS_CLICK_CONTINUE in lead_platform.py doesn't
     # recognise as a CTA -- override with "request" added so
     # _handle_post_offer's CTA finder can locate and click it (then chase the
-    # resulting popup/new-tab/in-place navigation exactly like AEF).
+    # resulting popup/new-tab/in-place navigation).
     _JS_CLICK_CONTINUE = r"""(dryRun) => {
         const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
         const t = e => (e.innerText || e.value || '').replace(/\s+/g, ' ').trim();
@@ -201,12 +212,18 @@ class FormFiller(BasePlatformFiller):
     # --------------------------------------------------------------- flow
 
     def _fill_form(self, page: Page, f: dict, row_number: int, stop_event) -> str:
-        self._pick_loan_amount_chip(page, f, row_number)
+        if not self._is_welcome_back_review(page):
+            self._pick_loan_amount_chip(page, f, row_number)
 
         seen: dict[str, int] = {}
         for step_num in range(self._max_steps):
             self._check_stop(stop_event)
             self._bypass_returning_applicant(page, row_number)
+            if self._is_congratulations(page):
+                log.info("form.congratulations", row=row_number)
+                break
+            if self._complete_welcome_back_review(page, row_number):
+                break
 
             names = self._visible_fields(page)
             heading = self._heading(page)
@@ -240,16 +257,34 @@ class FormFiller(BasePlatformFiller):
                         error_type="field_rejected",
                     )
                 self._action_pause()
+                err = self._visible_field_error(page)
+                if err:
+                    self._screenshot(page, row_number, f"invalid_{step_num}")
+                    raise FormFillerError(
+                        f"Field rejected on step {step_num} ('{heading}'): {err}",
+                        error_type="field_rejected",
+                    )
                 if not self._click_next(page):
-                    # No plain "Next" -- this was the final step (bank details);
-                    # whatever CTA is present routes into the lender-match flow.
+                    # Final wizard step (SSN / "Request Cash") — click that CTA
+                    # but only leave the wizard if the step actually advanced.
+                    self._click_final_cta(page)
+                    self._await_change(page, sig, timeout=10.0)
+                    still = self._heading(page)
+                    err = self._visible_field_error(page)
+                    if err or (still and still == heading):
+                        self._screenshot(page, row_number, f"final_stuck_{step_num}")
+                        raise FormFillerError(
+                            f"Final step did not advance ('{still or heading}'): "
+                            f"{err or 'CTA click left the same question on screen'}",
+                            error_type="field_rejected",
+                        )
                     break
                 self._await_change(page, sig)
                 continue
 
             if re.search(r"next pay ?date|when is your next pay", heading, re.I):
                 self._read_pause()
-                self._pick_payday(page, row_number)
+                self._set_payday_from_sheet(page, row_number)
                 self._action_pause()
                 self._click_next(page)
                 self._await_change(page, sig)
@@ -258,6 +293,9 @@ class FormFiller(BasePlatformFiller):
             # No <input> on this step: either a chip-choice screen, or we've
             # already arrived at the post-application lender-match page.
             buttons = self._choice_buttons(page)
+            if self._is_congratulations(page):
+                log.info("form.congratulations", row=row_number)
+                break
             if not buttons:
                 post = page.evaluate(self._JS_POST_STATE)
                 if post.get("processing") or post.get("buttons"):
@@ -294,18 +332,31 @@ class FormFiller(BasePlatformFiller):
     def _pick_loan_amount_chip(self, page: Page, f: dict, row_number: int) -> None:
         wanted = int(f.get("loan_amount") or 1000)
         nearest = min(_LOAN_CHIPS, key=lambda c: abs(c - wanted))
-        label = f"${nearest:,}"
-        try:
-            loc = page.locator("button.ef-btn", has_text=label).first
-            loc.wait_for(state="visible", timeout=20000)
-            loc.click()
-        except Exception as e:
-            self._screenshot(page, row_number, "no_amount_chip")
-            raise FormFillerError(
-                f"Could not find loan-amount chip '{label}': {e}", error_type="stuck"
-            )
-        log.info("form.loan_amount", chip=label, row=row_number)
-        time.sleep(1.5)
+        labels = [f"${nearest:,}", f"${nearest}", f"${nearest:,.0f}"]
+        fr = self._form_frame(page)
+        last_err = ""
+        for root in (fr, page):
+            for label in labels:
+                try:
+                    loc = root.locator("button.ef-btn, button, [role=button]", has_text=label).first
+                    loc.wait_for(state="visible", timeout=8000)
+                    loc.click(force=True)
+                    log.info("form.loan_amount", chip=label, row=row_number)
+                    time.sleep(1.5)
+                    return
+                except Exception as e:
+                    last_err = str(e)[:100]
+                    continue
+        names = self._visible_fields(page)
+        heading = self._heading(page)
+        if names or (heading and not re.search(r"how much|loan amount|need\?", heading, re.I)):
+            log.info("form.loan_amount_skipped", heading=heading[:60],
+                     fields=[n["name"] for n in names][:6], row=row_number)
+            return
+        self._screenshot(page, row_number, "no_amount_chip")
+        raise FormFillerError(
+            f"Could not find loan-amount chip '{labels[0]}': {last_err}", error_type="stuck"
+        )
 
     def _pick_payday(self, page: Page, row_number: int) -> None:
         """The next-payday step is a calendar grid, not a plain chip choice.
@@ -318,7 +369,7 @@ class FormFiller(BasePlatformFiller):
         that are padding sit at the very start — so the *first* occurrence of
         a low target day and the *last* occurrence of a high one is the
         current month's real cell."""
-        raw = self._raw(("Next Payday",))
+        raw = self._sheet_payday()
         target_day = None
         if raw:
             # "MM/DD/YYYY" -> day is the second number.
@@ -330,11 +381,22 @@ class FormFiller(BasePlatformFiller):
                     target_day = None
         days: list[dict] = []
         deadline = time.time() + 8
+        fr = self._form_frame(page)
         while time.time() < deadline and not days:
             try:
-                days = page.evaluate(
-                    """() => Array.from(document.querySelectorAll('.ef-calendar__day-btn')).map(b => ({
-                        text: b.innerText.trim(), disabled: b.disabled
+                days = fr.evaluate(
+                    """() => Array.from(document.querySelectorAll(
+                        '.ef-calendar__day-btn, [class*="calendar"] button, [role="gridcell"]'
+                    )).filter(b => {
+                        const st = getComputedStyle(b);
+                        if (st.display === 'none' || st.visibility === 'hidden') return false;
+                        const r = b.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    }).map(b => ({
+                        text: b.innerText.trim(),
+                        disabled: !!(b.disabled
+                            || b.getAttribute('aria-disabled') === 'true'
+                            || /disabled|outside|other-month|muted/i.test(b.className || ''))
                     }))"""
                 ) or []
             except Exception:
@@ -360,7 +422,10 @@ class FormFiller(BasePlatformFiller):
                 idx = matches[-1]
             if idx is not None and days[idx]["disabled"]:
                 enabled = [i for i in matches if not days[i]["disabled"]]
-                idx = enabled[0] if enabled else idx
+                idx = enabled[0] if enabled else None
+        if idx is not None and days[idx]["disabled"]:
+            idx = next((i for i, d in enumerate(days)
+                        if not d["disabled"] and re.fullmatch(r"\d+( Today)?", d["text"])), None)
 
         if idx is None:
             self._screenshot(page, row_number, "payday_unmatched")
@@ -370,7 +435,8 @@ class FormFiller(BasePlatformFiller):
             )
 
         try:
-            page.locator(".ef-calendar__day-btn").nth(idx).click()
+            loc = fr.locator(".ef-calendar__day-btn, [class*='calendar'] button, [role='gridcell']")
+            loc.nth(idx).click()
         except Exception as e:
             self._screenshot(page, row_number, "payday_click_failed")
             raise FormFillerError(f"Could not click payday cell: {e}", error_type="stuck")
@@ -379,10 +445,319 @@ class FormFiller(BasePlatformFiller):
 
     # ------------------------------------------------------- returning user
 
+    def _form_frame(self, page: Page):
+        """The ef- wizard is sometimes in the main document, sometimes an iframe."""
+        for fr in page.frames:
+            try:
+                if fr.is_detached():
+                    continue
+                if fr.evaluate(
+                    """() => {
+                        if (document.querySelector('#ef-container')) return true;
+                        const b = (document.body && document.body.innerText) || '';
+                        return /welcome back|next pay date|request cash|what is your email/i.test(b);
+                    }"""
+                ):
+                    return fr
+            except Exception:
+                continue
+        return page
+
+    def _is_welcome_back_review(self, page: Page) -> bool:
+        """Short returning-applicant screen: Welcome Back + Next Pay Date + Request Cash."""
+        try:
+            return bool(self._form_frame(page).evaluate(
+                r"""() => {
+                    const body = (document.body && document.body.innerText) || '';
+                    if (!/welcome back/i.test(body)) return false;
+                    return /next pay date|request cash|please choose a date from the calendar/i.test(body);
+                }"""
+            ))
+        except Exception:
+            return False
+
+    def _calendar_is_open(self, page: Page) -> bool:
+        """True only when a day grid is showing — not the trailing calendar icon."""
+        try:
+            return bool(self._form_frame(page).evaluate(
+                r"""() => {
+                    const vis = e => {
+                        if (!e) return false;
+                        const st = getComputedStyle(e);
+                        if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0)
+                            return false;
+                        const r = e.getBoundingClientRect();
+                        return r.width > 8 && r.height > 8;
+                    };
+                    const days = Array.from(document.querySelectorAll(
+                        '.ef-calendar__day-btn, [class*="calendar"] button, [class*="datepicker"] button, [role="gridcell"]'
+                    )).filter(vis).filter(e => /^\d{1,2}(\s*Today)?$/.test(
+                        (e.innerText || '').replace(/\s+/g, ' ').trim()
+                    ));
+                    return days.length >= 7;
+                }"""
+            ))
+        except Exception:
+            return False
+
+    def _payday_value(self, page: Page) -> str:
+        """Date actually committed into Next Pay Date — not the placeholder."""
+        try:
+            return (self._form_frame(page).evaluate(
+                r"""() => {
+                    const vis = e => {
+                        if (!e) return false;
+                        const st = getComputedStyle(e);
+                        if (st.display === 'none' || st.visibility === 'hidden') return false;
+                        const r = e.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    };
+                    const key = e => ((e.placeholder || '') + ' ' + (e.name || '') + ' ' + (e.id || '')
+                        + ' ' + (e.getAttribute('aria-label') || '')).toLowerCase();
+                    for (const e of Array.from(document.querySelectorAll('input')).filter(vis)) {
+                        if (!/pay/.test(key(e))) continue;
+                        const v = (e.value || '').trim();
+                        if (v && /\d/.test(v) && !/^next pay date$/i.test(v)) return v;
+                    }
+                    for (const e of Array.from(document.querySelectorAll('div,label,span')).filter(vis)) {
+                        const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+                        if (t.length > 80 || !/next pay date/i.test(t)) continue;
+                        const m = t.match(/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/);
+                        if (m) return m[0];
+                    }
+                    return '';
+                }"""
+            ) or "").strip()
+        except Exception:
+            return ""
+
+    def _payday_input(self, page: Page):
+        fr = self._form_frame(page)
+        for sel in (
+            'input[placeholder*="Next Pay" i]',
+            'input[placeholder*="Pay Date" i]',
+            'input[aria-label*="Next Pay" i]',
+            'input[name*="payDate" i]',
+            'input[name*="PayDate" i]',
+            'input[id*="payDate" i]',
+            'input[id*="PayDate" i]',
+            '[class*="datepicker"] input',
+        ):
+            loc = fr.locator(sel).first
+            try:
+                if loc.count() > 0:
+                    return loc
+            except Exception:
+                continue
+        return None
+
+    def _tap_payday_field(self, page: Page) -> bool:
+        """Click the calendar icon on the right of Next Pay Date."""
+        fr = self._form_frame(page)
+        row = fr.locator(
+            'xpath=//*[normalize-space()="Next Pay Date"]/ancestor::*[.//svg or .//button][1]'
+        )
+        try:
+            target = row.first
+            target.scroll_into_view_if_needed(timeout=2000)
+            box = target.bounding_box()
+            if box and box["width"] > 24:
+                # Icon sits on the far right of the field.
+                page.mouse.click(box["x"] + box["width"] - 16, box["y"] + box["height"] / 2)
+                time.sleep(0.6)
+                if self._calendar_is_open(page):
+                    return True
+            icon = target.locator("svg, button, [class*='calendar'], [class*='icon']").last
+            icon.click(timeout=2000, force=True)
+            time.sleep(0.6)
+            if self._calendar_is_open(page):
+                return True
+        except Exception:
+            pass
+        try:
+            fr.evaluate(
+                r"""() => {
+                    const vis = e => {
+                        const r = e.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    };
+                    const label = Array.from(document.querySelectorAll('div,span,label,p'))
+                        .find(e => vis(e) && (e.innerText || '').replace(/\s+/g, ' ').trim() === 'Next Pay Date');
+                    if (!label) return false;
+                    let row = label;
+                    for (let i = 0; i < 6 && row && row !== document.body; i++) {
+                        const t = (row.innerText || '').replace(/\s+/g, ' ').trim();
+                        if (t.length < 60) {
+                            const icon = row.querySelector('svg, [class*="calendar"], button');
+                            if (icon) {
+                                (icon.closest('button') || icon).click();
+                                return true;
+                            }
+                        }
+                        row = row.parentElement;
+                    }
+                    label.click();
+                    return true;
+                }"""
+            )
+            time.sleep(0.6)
+        except Exception:
+            pass
+        return self._calendar_is_open(page)
+
+    def _open_payday_calendar(self, page: Page) -> bool:
+        if self._calendar_is_open(page):
+            return True
+        return self._tap_payday_field(page)
+
+    def _set_payday_from_sheet(self, page: Page, row_number: int) -> str:
+        """Tap Next Pay Date, wait for the calendar, click the sheet day."""
+        wanted = self._sheet_payday()
+        log.info("form.payday_tap_calendar", value=wanted, row=row_number)
+        for _ in range(5):
+            if self._calendar_is_open(page):
+                break
+            self._tap_payday_field(page)
+            time.sleep(0.4)
+        if self._calendar_is_open(page):
+            try:
+                self._pick_payday(page, row_number)
+            except FormFillerError as e:
+                log.warning("form.payday_calendar_unmatched", error=str(e)[:80],
+                            row=row_number)
+            err = self._visible_field_error(page)
+            if err and re.search(r"calendar|date|choose", err, re.I):
+                picked = self._click_enabled_calendar_day(page)
+                if picked:
+                    log.info("form.payday_fallback_future", day=picked, row=row_number)
+        else:
+            log.warning("form.payday_calendar_not_open", row=row_number)
+        time.sleep(0.35)
+        return self._payday_value(page) or wanted
+
+    def _click_enabled_calendar_day(self, page: Page) -> str:
+        """Click the first enabled visible day. Never clicks disabled padding days."""
+        deadline = time.time() + 3.5
+        while time.time() < deadline and not self._calendar_is_open(page):
+            time.sleep(0.2)
+        if not self._calendar_is_open(page):
+            return ""
+        fr = self._form_frame(page)
+        loc = fr.locator(
+            '.ef-calendar__day-btn, [role="gridcell"], [class*="calendar"] button, [class*="datepicker"] button'
+        )
+        try:
+            n = loc.count()
+        except Exception:
+            return ""
+        for i in range(n):
+            cell = loc.nth(i)
+            try:
+                if not cell.is_visible():
+                    continue
+                text = re.sub(r"\s+", " ", cell.inner_text() or "").strip()
+                if not re.fullmatch(r"\d{1,2}(\s*Today)?", text):
+                    continue
+                if cell.is_disabled():
+                    continue
+                if cell.get_attribute("aria-disabled") == "true":
+                    continue
+                cls = cell.get_attribute("class") or ""
+                if re.search(r"disabled|outside|muted|inactive|faded|other-month", cls, re.I):
+                    continue
+                if re.search(r"today", text, re.I):
+                    continue
+                day_n = int(re.sub(r"\D", "", text) or "0")
+                if 1 <= day_n <= date.today().day:
+                    # Same-month past/today cells are still clickable but the
+                    # form rejects them. Prefer a later day; next-month padding
+                    # is filtered by other-month class above.
+                    continue
+                cell.click(timeout=2000)
+                return re.sub(r"\s*Today", "", text, flags=re.I).strip()
+            except Exception:
+                continue
+        return ""
+
+    def _sheet_payday(self) -> str:
+        """Next Payday from the sheet as MM/DD/YYYY, always after today."""
+        return self._ensure_future_payday(
+            self._raw(("Next Payday", "Next Pay Date", "Payday"))
+        )
+
+    def _click_request_cash(self, page: Page) -> bool:
+        fr = self._form_frame(page)
+        try:
+            btn = fr.get_by_role("button", name=re.compile(r"request\s*(cash|loan|now)", re.I)).first
+            btn.click(timeout=3000)
+            return True
+        except Exception:
+            pass
+        try:
+            return bool(fr.evaluate(
+                r"""() => {
+                    const vis = e => {
+                        if (!e) return false;
+                        const r = e.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    };
+                    const t = e => (e.innerText || e.value || '').replace(/\s+/g, ' ').trim();
+                    const b = Array.from(document.querySelectorAll(
+                        'button,input[type=submit],[role=button]'
+                    )).filter(vis).find(e => /request\s*(cash|loan|now)/i.test(t(e)));
+                    if (!b) return false;
+                    b.click();
+                    return true;
+                }"""
+            ))
+        except Exception:
+            return False
+
+    def _complete_welcome_back_review(self, page: Page, row_number: int) -> bool:
+        """Click the calendar icon, pick the sheet day, then Request Cash."""
+        if not self._is_welcome_back_review(page):
+            return False
+        log.info("form.welcome_back_review", row=row_number)
+        self._read_pause()
+        self._set_payday_from_sheet(page, row_number)
+        if not self._payday_value(page):
+            self._tap_payday_field(page)
+            try:
+                self._pick_payday(page, row_number)
+            except FormFillerError:
+                pass
+        if not self._payday_value(page):
+            self._screenshot(page, row_number, "welcome_back_payday")
+            raise FormFillerError(
+                "Next Pay Date calendar did not open or accept a day — Request Cash not clicked",
+                error_type="field_rejected",
+            )
+        self._action_pause()
+        if not self._click_request_cash(page):
+            self._click_final_cta(page)
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            time.sleep(0.6)
+            if not self._is_welcome_back_review(page):
+                log.info("form.welcome_back_submitted", row=row_number)
+                return True
+            err = self._visible_field_error(page)
+            if err and re.search(r"date|calendar", err, re.I):
+                self._set_payday_from_sheet(page, row_number)
+                if self._payday_value(page):
+                    self._click_request_cash(page)
+        if self._is_welcome_back_review(page):
+            self._screenshot(page, row_number, "welcome_back_payday")
+            raise FormFillerError(
+                "Welcome Back still on screen after calendar date + Request Cash",
+                error_type="field_rejected",
+            )
+        return True
+
     def _bypass_returning_applicant(self, page: Page, row_number: int) -> None:
         """A phone number the platform already has triggers a "Welcome Back"
         shortcut; always take the full-form path so every sheet field gets
-        submitted (mirrors AEF's returning-applicant handling)."""
+        submitted (so every sheet field is posted)."""
         try:
             clicked = page.evaluate(
                 r"""() => {
@@ -406,19 +781,19 @@ class FormFiller(BasePlatformFiller):
 
     def _visible_fields(self, page: Page) -> list[dict]:
         try:
-            return page.evaluate(_FIELD_JS) or []
+            return self._form_frame(page).evaluate(_FIELD_JS) or []
         except Exception:
             return []
 
     def _choice_buttons(self, page: Page) -> list[str]:
         try:
-            return page.evaluate(_BUTTONS_JS) or []
+            return self._form_frame(page).evaluate(_BUTTONS_JS) or []
         except Exception:
             return []
 
     def _heading(self, page: Page) -> str:
         try:
-            return page.evaluate(_HEADING_JS) or ""
+            return self._form_frame(page).evaluate(_HEADING_JS) or ""
         except Exception:
             return ""
 
@@ -437,6 +812,12 @@ class FormFiller(BasePlatformFiller):
             known.append(name)
             try:
                 value = str(f.get(key, "") or "")
+                if key == "next_payday":
+                    value = value or self._sheet_payday()
+                if key == "ssn":
+                    digits = re.sub(r"\D", "", value)
+                    if len(digits) == 9:
+                        value = f"{digits[:3]}-{digits[3:5]}-{digits[5:]}"
                 ok = (self._select_by_field(page, name, field, value)
                       if field["tag"] == "SELECT" else self._type_field(page, name, value))
                 (filled if ok else failed).append(name)
@@ -448,17 +829,51 @@ class FormFiller(BasePlatformFiller):
     def _type_field(self, page: Page, name: str, value: str) -> bool:
         if not value:
             return False
+        fr = self._form_frame(page)
+        typed = False
         try:
-            loc = page.locator(f'[name="{name}"]').first
+            loc = fr.locator(f'[name="{name}"]').first
             loc.wait_for(state="visible", timeout=8000)
             loc.click()
             loc.fill("")
             loc.press_sequentially(value, delay=self._key_delay())
+            typed = True
         except Exception as e:
             log.warning("form.type_failed", field=name, error=str(e)[:80])
+        if not typed:
+            try:
+                typed = bool(fr.evaluate(
+                    """([n, v]) => {
+                        const el = document.querySelector('[name=\"' + n + '\"]');
+                        if (!el) return false;
+                        el.focus();
+                        const proto = el.tagName === 'TEXTAREA'
+                            ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                        if (desc && desc.set) desc.set.call(el, v); else el.value = v;
+                        ['input','change','blur'].forEach(ev =>
+                            el.dispatchEvent(new Event(ev, {bubbles: true})));
+                        return true;
+                    }""",
+                    [name, value],
+                ))
+            except Exception as e:
+                log.warning("form.type_js_failed", field=name, error=str(e)[:80])
+                return False
+        try:
+            got = fr.evaluate(
+                "(n) => { const e = document.querySelector('[name=\"'+n+'\"]'); return e ? e.value : ''; }",
+                name,
+            ) or ""
+        except Exception:
+            got = ""
+        if not got:
             return False
-        got = page.evaluate("(n) => { const e = document.querySelector('[name=\"'+n+'\"]'); return e ? e.value : ''; }", name)
-        return bool(got and (got.strip() == value.strip() or re.sub(r"\D", "", got) == re.sub(r"\D", "", value)))
+        if got.strip().lower() == value.strip().lower():
+            return True
+        if re.sub(r"\D", "", got) and re.sub(r"\D", "", got) == re.sub(r"\D", "", value):
+            return True
+        return False
 
     def _select_by_field(self, page: Page, name: str, field: dict, value: str) -> bool:
         """Selects: pick the raw sheet text for this concept when the coded
@@ -498,9 +913,47 @@ class FormFiller(BasePlatformFiller):
             log.warning("form.select_failed", field=name, value=desired, error=str(e)[:80])
             return False
 
+    def _visible_field_error(self, page: Page) -> str:
+        """Inline validation painted in red under an input — not legal/footer copy."""
+        try:
+            return (self._form_frame(page).evaluate(
+                r"""() => {
+                    const vis = e => e && e.offsetParent !== null && e.getClientRects().length > 0;
+                    const norm = e => (e.innerText || '').replace(/\s+/g, ' ').trim();
+                    const legal = t => /disclosure|terms of use|privacy policy|e-signature|credit authorization|read carefully|mobile phone disclosure/i.test(t);
+
+                    for (const n of document.querySelectorAll('span,p,div,small,label')) {
+                        if (!vis(n)) continue;
+                        const t = norm(n);
+                        if (t && t.length < 120 && /please choose a date from the calendar/i.test(t))
+                            return t;
+                    }
+
+                    const nodes = Array.from(document.querySelectorAll(
+                        '[class*="error"],[class*="invalid"],.ef-field__error,.ef-hint--error,[role="alert"]'
+                    )).filter(vis);
+                    for (const n of nodes) {
+                        const t = norm(n);
+                        if (!t || t.length > 160 || legal(t)) continue;
+                        if (/invalid|required|enter a|please enter|please choose|must be|not valid/i.test(t))
+                            return t;
+                    }
+                    return '';
+                }"""
+            ) or "").strip()
+        except Exception:
+            return ""
+
+    def _click_final_cta(self, page: Page) -> None:
+        """Click Request Cash / Request Loan when there is no Next button."""
+        try:
+            page.evaluate(self._JS_CLICK_CONTINUE, False)
+        except Exception:
+            pass
+
     def _click_next(self, page: Page) -> bool:
         try:
-            clicked = page.evaluate(
+            clicked = self._form_frame(page).evaluate(
                 r"""() => {
                     const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
                     const t = e => (e.innerText||'').replace(/\s+/g,' ').trim().toLowerCase();
@@ -516,7 +969,7 @@ class FormFiller(BasePlatformFiller):
 
     def _click_button_text(self, page: Page, text: str) -> None:
         try:
-            page.evaluate(
+            self._form_frame(page).evaluate(
                 r"""(want) => {
                     const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
                     const t = e => (e.innerText||'').replace(/\s+/g,' ').trim();
@@ -559,6 +1012,19 @@ class FormFiller(BasePlatformFiller):
                         return b
                 return ""
 
+        if re.search(r"pay\s*frequency|how often", heading, re.I):
+            raw = self._raw(("Pay Frequency",))
+            want = ""
+            for pat, chip in _PAY_FREQ_ALIASES:
+                if pat.search(raw or ""):
+                    want = chip
+                    break
+            if want:
+                for b in buttons:
+                    if re.sub(r"[^a-z]", "", b.lower()) == re.sub(r"[^a-z]", "", want.lower()):
+                        return b
+            # Fall through to generic category matching.
+
         for pattern, cols in _CATEGORY_HEADING_MAP:
             if pattern.search(heading):
                 raw = self._raw(cols).lower()
@@ -598,6 +1064,9 @@ class FormFiller(BasePlatformFiller):
                 raw = self._raw((col,))
                 years_match = re.search(r"\d+", raw)
                 years = int(years_match.group()) if years_match else 5
+                # Sheet4 stores months in these columns (36, 60, …).
+                if years > 12 and "year" not in (raw or "").lower():
+                    years = max(1, round(years / 12))
                 best, best_diff = "", None
                 for b in buttons:
                     nums = [int(n) for n in re.findall(r"\d+", b)]

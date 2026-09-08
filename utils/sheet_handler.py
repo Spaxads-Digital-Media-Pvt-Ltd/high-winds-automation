@@ -58,6 +58,7 @@ class SheetHandler:
 
         self._worksheet = self._open_worksheet()
         self._headers: list[str] = self._worksheet.row_values(1)
+        self._ensure_extra_lead_columns()
         self._ensure_result_columns()
         log.info("sheet.connected", worksheet=self._worksheet_name, columns=len(self._headers))
 
@@ -72,6 +73,104 @@ class SheetHandler:
             # Treat as spreadsheet ID
             spreadsheet = client.open_by_key(self._sheet_url)
         return spreadsheet.worksheet(self._worksheet_name)
+
+    # Extra lead columns needed by the 247 Lending Group follow-up form.
+    # Added on connect so every offer tab stays in sync; defaults are filled
+    # only for columns that were just created (existing values are never overwritten).
+    _EXTRA_LEAD_COLUMNS = [
+        "Monthly Housing Payment",
+        "Own a Car",
+        "Has Checking Account",
+        "Verify Income",
+        "Credit Score Number",
+        "Business Checking Account",
+        "Business Age",
+        "Business Revenue",
+    ]
+    _EXTRA_LEAD_DEFAULTS = {
+        "Monthly Housing Payment": "1200",
+        "Own a Car": "No",
+        "Has Checking Account": "Yes",
+        "Verify Income": "Yes",
+        "Business Checking Account": "No",
+        "Business Age": "Not yet started",
+        "Business Revenue": "50000",
+    }
+
+    def _ensure_extra_lead_columns(self) -> None:
+        """Add 247 follow-up fields that the original lead sheet does not have."""
+        missing = [c for c in self._EXTRA_LEAD_COLUMNS if c not in self._headers]
+        if not missing:
+            return
+
+        needed_cols = len(self._headers) + len(missing)
+        if needed_cols > self._worksheet.col_count:
+            self._worksheet.resize(
+                rows=self._worksheet.row_count,
+                cols=needed_cols,
+            )
+
+        for col_name in missing:
+            next_col = len(self._headers) + 1
+            self._worksheet.update_cell(1, next_col, col_name)
+            self._headers.append(col_name)
+
+        log.info("sheet.lead_columns_added", columns=missing)
+        try:
+            self._fill_new_lead_column_defaults(missing)
+        except Exception as e:
+            log.warning("sheet.lead_defaults_failed", error=str(e)[:120])
+
+    def _fill_new_lead_column_defaults(self, new_columns: list[str]) -> None:
+        """Populate just-added 247 columns on existing data rows."""
+        records = self._retry(lambda: self._get_all_records())
+        if not records:
+            return
+
+        rating_key = next(
+            (h for h in self._headers
+             if h.strip().lower() in {"credit score rating", "credit_score", "credit score"}),
+            None,
+        )
+
+        def _score_from_rating(raw: str) -> str:
+            s = (raw or "").strip().lower()
+            for word, num in (
+                ("excellent", "750"), ("great", "750"), ("good", "680"),
+                ("fair", "620"), ("poor", "580"), ("bad", "580"),
+            ):
+                if s.startswith(word) or word in s:
+                    return num
+            digits = "".join(c for c in (raw or "") if c.isdigit())[:3]
+            return digits if len(digits) == 3 else "650"
+
+        updates: list[dict] = []
+        for idx, rec in enumerate(records, start=2):
+            has_lead = any(
+                str(rec.get(k) or "").strip()
+                for k in rec
+                if str(k).strip().lower() in {"first name", "first_name", "email address", "email"}
+            )
+            if not has_lead:
+                continue
+            for col in new_columns:
+                col_i = self._headers.index(col) + 1
+                if col == "Credit Score Number":
+                    val = _score_from_rating(str(rec.get(rating_key, "") if rating_key else ""))
+                else:
+                    val = self._EXTRA_LEAD_DEFAULTS.get(col, "")
+                if val:
+                    updates.append({
+                        "range": gspread.utils.rowcol_to_a1(idx, col_i),
+                        "values": [[val]],
+                    })
+
+        # Batch in chunks to stay under Sheets API payload limits.
+        for i in range(0, len(updates), 80):
+            chunk = updates[i:i + 80]
+            self._retry(lambda c=chunk: self._worksheet.batch_update(c))
+
+        log.info("sheet.lead_defaults_filled", columns=new_columns, rows=len(records))
 
     # ── helpers ──────────────────────────────────────────────────────
 
@@ -144,6 +243,19 @@ class SheetHandler:
 
     # ── public API ───────────────────────────────────────────────────
 
+    def _get_all_records(self) -> list[dict[str, Any]]:
+        """Read every data row.
+
+        Sheets wider than the header row pad the first row with blank cells.
+        gspread then treats those empty names as duplicate headers unless
+        ``expected_headers`` is the unique named columns.
+        """
+        expected = list(dict.fromkeys(h for h in self._headers if str(h).strip()))
+        return self._worksheet.get_all_records(
+            numericise_ignore=["all"],
+            expected_headers=expected,
+        )
+
     def get_pending_rows(self) -> list[dict[str, Any]]:
         """
         Return all rows where the Status column == 'Pending'.
@@ -152,20 +264,27 @@ class SheetHandler:
           • ``_row_number``  – the 1-based sheet row (for updates)
           • every column header → cell value
         """
-        # numericise_ignore=['all'] keeps every cell as a string so leading
-        # zeros (DL/state-id, routing, zip, SSN) are preserved — gspread would
-        # otherwise convert "0123456" → 123456 and drop the leading zero.
-        all_records = self._retry(
-            lambda: self._worksheet.get_all_records(numericise_ignore=["all"])
-        )
+        all_records = self._retry(lambda: self._get_all_records())
         status_col = self._col_map.get("status", "Status")
         pending: list[dict[str, Any]] = []
 
         for idx, record in enumerate(all_records, start=2):  # row 1 = header
             val = str(record.get(status_col, "")).strip().lower()
-            if val in ("pending", ""):
-                record["_row_number"] = idx
-                pending.append(record)
+            if val not in ("pending", ""):
+                continue
+            # Gap rows between old data and a later paste have blank Status
+            # and no lead fields — skip them so they never burn a browser run.
+            has_lead = any(
+                str(record.get(k) or "").strip()
+                for k in (
+                    "First Name", "First_Name", "first_name",
+                    "Email Address", "Email Address", "Email", "email",
+                )
+            )
+            if not has_lead:
+                continue
+            record["_row_number"] = idx
+            pending.append(record)
 
         log.info("sheet.pending_rows", count=len(pending))
         return pending

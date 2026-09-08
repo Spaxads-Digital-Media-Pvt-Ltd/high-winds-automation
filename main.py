@@ -175,7 +175,10 @@ def main() -> None:
 
         # Get current retry count from sheet
         rc_col = config.get("sheet_columns", {}).get("retry_count", "Retry_Count")
-        retry_count = int(row.get(rc_col, 0) or 0)
+        try:
+            retry_count = int(str(row.get(rc_col, 0) or 0).strip() or 0)
+        except (TypeError, ValueError):
+            retry_count = 0
 
         attempt = 0
         success = False

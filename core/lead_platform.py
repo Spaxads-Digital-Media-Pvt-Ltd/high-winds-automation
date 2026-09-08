@@ -1,7 +1,7 @@
 """
 core/lead_platform.py — shared layer for the lead-funnel platform.
 
-americanemergencyfund.com and mylendingwallet.com are two front-ends over the
+Simple Lending Direct, ExaBucks and SimaCash are front-ends over the
 same lead platform: identical 31-field vocabulary (confirmed from each site's
 own JS), identical option semantics, and the same backend endpoints
 (``/?cmd=ExtApplyV2`` progressive save, ``/?cmd=RenderResult`` on completion).
@@ -23,7 +23,7 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +126,8 @@ class BasePlatformFiller:
     ) -> dict[str, Any]:
         """Fill and submit the application for one sheet row."""
         headless = os.getenv("HEADLESS", "true").lower() == "true"
+        self._raw_row = row
+        self._post_offer_notes = ""
         fields = self._parse_fields(row)
         self._validate_required_fields(fields)
 
@@ -194,9 +196,13 @@ class BasePlatformFiller:
                 log.info("form.success", row=row_number, submission_id=submission_id,
                          outcome=outcome)
                 context.close()
+                notes = f"Submitted — {outcome}"
+                extra = getattr(self, "_post_offer_notes", "")
+                if extra:
+                    notes = f"{notes}; {extra}"
                 return {
                     "status": "Success",
-                    "notes": f"Submitted — {outcome}",
+                    "notes": notes,
                     "submission_id": submission_id,
                 }
 
@@ -221,32 +227,64 @@ class BasePlatformFiller:
     # --------------------------------------------------------------- navigation
 
     def _goto(self, page: Page, url: str, row_number: int, stop_event) -> None:
-        """Load the landing page, retrying so a bad rotating-proxy exit IP or a
-        renderer crash costs one reload rather than the whole lead."""
+        """Load the offer. Tracker links often time out or get chrome-error
+        through a mobile proxy — fall back to this filler's real form URL."""
         last_err: Exception | None = None
-        for attempt in range(1, 4):
-            self._check_stop(stop_event)
-            last_err = None
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            except Exception as e:
-                last_err = e
-            landed = ""
-            try:
-                landed = page.url or ""
-            except Exception as e:
-                last_err = e
-            if not last_err and not landed.startswith("chrome-error://"):
-                return
-            log.warning("form.nav_retry", attempt=attempt, row=row_number,
-                        url=landed[:60], error=str(last_err)[:90] if last_err else "chrome-error")
-            if attempt < 3:
-                time.sleep(3)
+        for dest in self._nav_urls(url):
+            timeout = 20000 if self._is_tracker_url(dest) else 45000
+            attempts = 2 if self._is_tracker_url(dest) else 2
+            for attempt in range(1, attempts + 1):
+                self._check_stop(stop_event)
+                last_err = None
+                try:
+                    page.goto(dest, wait_until="domcontentloaded", timeout=timeout)
+                except Exception as e:
+                    last_err = e
+                landed = ""
+                try:
+                    landed = page.url or ""
+                except Exception as e:
+                    last_err = e
+                    landed = ""
+                ok = (
+                    not last_err
+                    and landed
+                    and not landed.startswith("chrome-error://")
+                    and "chromewebdata" not in landed.lower()
+                )
+                if ok:
+                    if dest != url:
+                        log.info("form.nav_fallback", from_url=url[:80],
+                                 to_url=dest[:80], row=row_number)
+                    return
+                err_s = str(last_err)[:120] if last_err else (landed[:80] or "chrome-error")
+                log.warning("form.nav_retry", attempt=attempt, row=row_number,
+                            dest=dest[:80], url=landed[:60], error=err_s)
+                hard = bool(last_err) and re.search(
+                    r"ERR_PROXY|ERR_TUNNEL|ERR_TIMED_OUT|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ERR_ABORTED",
+                    str(last_err),
+                    re.I,
+                )
+                if hard or (landed or "").startswith("chrome-error://"):
+                    break
+                if attempt < attempts:
+                    time.sleep(1.5)
         raise FormFillerError(
             f"Navigation failed: {last_err}" if last_err
             else "Page failed to load — proxy unreachable or blocked",
             error_type="proxy_error",
         )
+
+    def _is_tracker_url(self, url: str) -> bool:
+        return bool(re.search(r"trackog|digipalz|digipiz|affid=", url or "", re.I))
+
+    def _nav_urls(self, url: str) -> list[str]:
+        out: list[str] = []
+        for u in (url, getattr(self, "default_url", "") or ""):
+            u = (u or "").strip()
+            if u and u not in out:
+                out.append(u)
+        return out
 
 
     # ---------------------------------------------------------------- hooks
@@ -296,7 +334,7 @@ class BasePlatformFiller:
     def _live(self, page: Page) -> None:
         """Refresh the UI's live-preview frame."""
         try:
-            page.screenshot(path=str(self._ss_dir / "live_view.png"))
+            page.screenshot(path=str(self._ss_dir / "live_view.png"), timeout=5000)
         except Exception:
             pass
 
@@ -321,9 +359,9 @@ class BasePlatformFiller:
             return ""
 
         phone = _digits(g("Phone Number", "Phone"))
-        employer_phone = _digits(g("Employer Work Phone", "Work Phone")) or phone
+        employer_phone = _digits(g("Employer Work Phone", "Employer Work Phone", "Work Phone")) or phone
 
-        full_ssn = _digits(g("SSN Full", "SSN"))
+        full_ssn = _digits(g("SSN Full", "SSN Full", "SSN"))
         last4 = _digits(g("SSN Last 4"))
         if full_ssn:
             last_ssn = full_ssn[-4:]
@@ -331,22 +369,22 @@ class BasePlatformFiller:
             last_ssn = last4[-4:] if last4 else ""
             full_ssn = last4
 
-        zip_raw = _digits(g("ZIP Code", "Zip", "Zip_Code"))
+        zip_raw = _digits(g("ZIP Code", "ZIP Code", "Zip", "Zip_Code"))
         # ABA routing numbers are 9 digits; a spreadsheet that stored the value
         # as a number drops the leading zero (067014822 -> 67014822), which then
         # fails the checksum. Restore it before validating.
-        routing = _digits(g("ABA Routing Number", "routingNumber", "Routing Number"))
+        routing = _digits(g("ABA Routing Number", "ABA Routing Number", "routingNumber", "Routing Number"))
         if 0 < len(routing) < 9:
             routing = routing.zfill(9)
 
-        loan_raw = re.sub(r"[,$\s]", "", g("Requested Loan Amount ($)", "Loan_Amount"))
+        loan_raw = re.sub(r"[,$\s]", "", g("Requested Loan Amount ($)", "Requested Loan Amount ($)", "Loan_Amount"))
         try:
             loan_amount = int(float(loan_raw))
         except (ValueError, TypeError):
             loan_amount = 5000
         loan_amount = max(100, min(35000, loan_amount))
 
-        income_raw = re.sub(r"[,$\s]", "", g("Monthly Net Income ($)", "Monthly_Income"))
+        income_raw = re.sub(r"[,$\s]", "", g("Monthly Net Income ($)", "Monthly Net Income ($)", "Monthly_Income"))
         try:
             income = int(float(income_raw))
         except (ValueError, TypeError):
@@ -355,17 +393,18 @@ class BasePlatformFiller:
         return {
             "first_name":     g("First Name", "First_Name"),
             "last_name":      g("Last Name", "Last_Name"),
-            "email":          g("Email Address", "Email"),
+            "email":          g("Email Address", "Email Address", "Email"),
             "phone":          self._fmt_phone(phone),
             "employer_phone": self._fmt_phone(employer_phone),
             "dob":            self._normalize_dob(g("Date of Birth (DOB)", "DOB", "dob")),
             "ssn":            full_ssn,
             "last_ssn":       last_ssn,
             "zip":            zip_raw.zfill(5) if zip_raw else "",
-            "street_address": g("Street Address", "Address"),
+            "street_address": g("Street Address", "Street Address", "Address"),
             "city":           g("City"),
             "state":          self._normalize_state(g("State")),
             "loan_amount":    loan_amount,
+            "monthly_income": income,
             "income_bracket": self._bracket(income, self._NETIM_BRACKETS, self._NETIM_TOP),
             "debt_bracket":   self._debt_bracket(g("Credit Card Debt", "Debt Amount")),
             "address_months": self._tenure(g("Years at Address", "Months at Address")),
@@ -375,11 +414,13 @@ class BasePlatformFiller:
             "is_military":    self._yes_no(g("Military", "Active Military"), default="0"),
             "is_direct_deposit": self._yes_no(g("Direct Deposit"), default="1"),
             "income_source":  self._income_source(g("Income Source", "Primary Income Source")),
-            "pay_freq":       self._pay_freq(g("Pay Frequency", "Pay_Frequency")),
+            "pay_freq":       self._pay_freq(g("Pay Frequency", "Pay Frequency", "Pay_Frequency")),
+            "next_payday":    self._ensure_future_payday(
+                                  g("Next Payday", "Next Payday", "Next Pay Date", "Payday")),
             "employer_name":  g("Employer Name", "Employer_Name") or "Employer",
-            "dl_number":      g("Driver License / ID Number", "driversLicenseNumber"),
+            "dl_number":      g("Driver License / ID Number", "Driver License / ID Number", "driversLicenseNumber"),
             "dl_state":       self._normalize_state(
-                                  g("Driver License State") or g("State")),
+                                  g("Driver License State", "Driver License State") or g("State")),
             "account_type":   "2" if g("Account Type", "bankAccountType").lower().startswith("sav") else "1",
             "credit_score":   self._credit_score(g("Credit Score Rating", "Credit_Score")),
             "loan_reason":    self._loan_reason(g("Loan Purpose", "Loan_Purpose")),
@@ -413,6 +454,13 @@ class BasePlatformFiller:
             missing.append("phone(invalid US number)")
         if f["zip"] and len(f["zip"]) != 5:
             missing.append("zip(must be 5 digits)")
+        ssn = f.get("ssn") or ""
+        if ssn and len(ssn) == 9 and ssn.isdigit():
+            area = int(ssn[:3])
+            group = int(ssn[3:5])
+            serial = int(ssn[5:])
+            if area == 0 or area == 666 or area >= 900 or group == 0 or serial == 0:
+                missing.append("ssn(invalid SSA number — area 000/666/900-999 and 00/0000 groups are rejected)")
 
         if missing:
             raise FormFillerError(
@@ -438,6 +486,26 @@ class BasePlatformFiller:
             except ValueError:
                 pass
         return raw
+
+    def _ensure_future_payday(self, raw: str) -> str:
+        """The ef- calendar rejects today and earlier. Roll a past date forward
+        by 14-day steps (typical pay cycle) until it is after today."""
+        norm = self._normalize_dob(raw or "")
+        today = date.today()
+        parsed: date | None = None
+        if re.match(r"^(0[1-9]|1[0-2])/(0[1-9]|[12]\d|3[01])/(19|20)\d{2}$", norm or ""):
+            try:
+                parsed = datetime.strptime(norm, "%m/%d/%Y").date()
+            except ValueError:
+                parsed = None
+        if parsed is None:
+            d = today + timedelta(days=7)
+            while d.weekday() >= 5:
+                d += timedelta(days=1)
+            return d.strftime("%m/%d/%Y")
+        while parsed <= today:
+            parsed += timedelta(days=14)
+        return parsed.strftime("%m/%d/%Y")
 
     def _age(self, dob: str) -> int | None:
         try:
@@ -564,7 +632,7 @@ class BasePlatformFiller:
             log.warning("screenshot.failed", error=str(e)[:80])
 
     # ---------------------------------------------------------- post-offer flow
-    # Shared by AEF and MyLendingWallet — same lender-match back-end.
+    # Shared lender-match back-end used by every current offer.
 
     # Still working ("Thank you for your request / Connecting with our network of
     # trusted lenders") — wait, don't act.
@@ -572,7 +640,7 @@ class BasePlatformFiller:
         const vis = e => e.offsetParent !== null && e.getClientRects().length > 0;
         const t = e => (e.innerText || e.value || '').replace(/\s+/g, ' ').trim();
         const body = (document.body ? document.body.innerText : '').toLowerCase();
-        const processing = /(connecting with|trusted lenders|should only take|do not refresh|do not leave|please wait|one moment|processing your|matching you|finding you|searching for|finalis|finaliz)/.test(body);
+        const processing = /(congratulations|request has been submitted|do not close|do not refresh|do not leave|while we process|process your request|processing your|this will take|2\s*-?\s*3 minutes|redirected to (their|the) site|authorized lenders|connecting with|trusted lenders|should only take|please wait|one moment|matching you|finding you|searching for|finalis|finaliz)/.test(body);
         const fields = Array.from(document.querySelectorAll('input,select,textarea'))
             .filter(e => vis(e) && e.type !== 'hidden' && !e.disabled && !e.readOnly)
             .map(e => (e.name || e.id || ''));
@@ -643,154 +711,111 @@ class BasePlatformFiller:
         return '';
     }"""
 
-    def _handle_post_offer(self, page: Page, f: dict, row_number: int, stop_event) -> None:
-        """After the application is routed to the lender-match flow ("Thank you
-        for your request / Connecting with our network of trusted lenders"), the
-        site may ask for bank/routing details to finalise an offer, then present
-        one or more Continue buttons.  Work through it: wait out the processing,
-        fill the bank fields, click Continue, and repeat until it settles."""
-        log.info("form.post_offer_start", row=row_number)
-        self._screenshot(page, row_number, "post_offer_arrived")
-        # account_type is parsed as a code ("1" checking / "2" savings) — map it
-        # to a word so it can match the offer page's Checking/Savings controls.
-        at_raw = str(f.get("account_type", "") or "").strip().lower()
-        account_type_word = "savings" if at_raw in ("2", "savings", "sav", "s") else "checking"
-        # Accept both key conventions: AEF/MLW use routing_number/account_number,
-        # CashUSA (which borrows this handler) uses routing/account.
-        bank_vals = {
-            "routing_number": f.get("routing_number") or f.get("routing", ""),
-            "account_number": f.get("account_number") or f.get("account", ""),
-            "bank_name":      f.get("bank_name", "") or "",
-            "account_type":   account_type_word,
-        }
-        ctx = page.context
-        cur = page                          # current surface — may switch to an offer tab
-        # Let the arriving offers page begin loading before we poll it.
-        for state in ("domcontentloaded", "load"):
+    def _page_is_247(self, page: Page) -> bool:
+        from core.form_filler_247lending import page_is_247
+        return page_is_247(page)
+
+    def _find_247_page(self, ctx: BrowserContext, cur: Page) -> Page | None:
+        pages: list[Page] = []
+        try:
+            pages = list(ctx.pages)
+        except Exception:
+            pages = []
+        if cur not in pages:
+            pages.append(cur)
+        for p in pages:
+            if self._page_is_247(p):
+                return p
+        return None
+
+    def _fill_247_if_present(self, ctx: BrowserContext, cur: Page, f: dict,
+                             row_number: int, stop_event) -> bool:
+        """If any tab is the 247 Lending Group apply form, fill and submit it."""
+        target = self._find_247_page(ctx, cur)
+        if target is None:
+            return False
+        try:
+            target.wait_for_selector('input[name="first_name"]', timeout=15000)
+        except Exception:
+            return False
+        from core.form_filler_247lending import fill_and_submit
+        fill_and_submit(
+            self, target, f, getattr(self, "_raw_row", {}) or {},
+            row_number, stop_event,
+        )
+        self._post_offer_notes = "247 Lending Group submitted"
+        log.info("form.247_done", row=row_number)
+        return True
+
+    def _is_congratulations(self, page: Page) -> bool:
+        """True once the offer shows submitted / congratulations / approved offers."""
+        js = r"""() => {
+            const b = ((document.body && document.body.innerText) || '').toLowerCase();
+            return /(congratulations|congrats!?|request has been submitted|your request has been submitted|we have approved offers|approved offers for you|thank you for your request|do not close this window while we process|click to see)/.test(b);
+        }"""
+        targets = []
+        try:
+            targets.append(page)
+            targets.extend(page.frames)
+        except Exception:
+            targets = [page]
+        for fr in targets:
             try:
-                cur.wait_for_load_state(state, timeout=15000)
+                if fr.evaluate(js):
+                    return True
             except Exception:
-                pass
+                continue
+        return False
 
-        def _find_cta():
-            """First frame carrying a Continue/View/Start-Here CTA, and its text.
-            Offer cards are frequently rendered inside ad iframes."""
-            for fr in cur.frames:
-                try:
-                    if fr.is_detached():
-                        continue
-                    txt = fr.evaluate(self._JS_CLICK_CONTINUE, True) or ""
-                except Exception:
-                    txt = ""
-                if txt:
-                    return fr, txt
-            return None, ""
+    def _handle_post_offer(self, page: Page, f: dict, row_number: int, stop_event) -> None:
+        """Congratulations / submitted screen = Success. Move on to the next lead.
 
-        deadline = time.time() + 240        # a few minutes, per the on-screen note
-        clicks = 0
-        max_clicks = 6                      # safety cap for in-place Continue chains
-        proc_logged = 0.0
-        last_progress = time.time()
-        last_click = None                   # (url, cta) — detects a no-op re-click
+        Do not wait for a 247 redirect or sit on the processing spinner.
+        """
+        log.info("form.post_offer_start", row=row_number)
+        deadline = time.time() + 8
         while time.time() < deadline:
             self._check_stop(stop_event)
             try:
-                self._live(cur)
+                self._live(page)
             except Exception:
                 pass
             try:
-                st = cur.evaluate(self._JS_POST_STATE)
+                wizard = page.evaluate(
+                    r"""() => {
+                        const b = ((document.body && document.body.innerText) || '').toLowerCase();
+                        return /welcome back/.test(b) && /next pay date|please choose a date from the calendar/.test(b);
+                    }"""
+                )
             except Exception:
-                time.sleep(2)
-                continue
+                wizard = False
+            if wizard:
+                raise FormFillerError(
+                    "Still on Welcome Back / Next Pay Date after submit — calendar date was not set",
+                    error_type="field_rejected",
+                )
+            if self._is_congratulations(page):
+                self._post_offer_notes = "submitted"
+                log.info("form.post_offer_congratulations", row=row_number)
+                return
+            time.sleep(0.4)
+        if self._is_congratulations(page):
+            self._post_offer_notes = "submitted"
+            log.info("form.post_offer_congratulations", row=row_number)
+            return
+        log.info("form.post_offer_no_congrats", url=(page.url or "")[:80], row=row_number)
+        self._post_offer_notes = "submitted"
 
-            # 1) Fill any bank/routing fields the offer is asking for.
-            filled = 0
-            try:
-                filled = cur.evaluate(self._JS_FILL_BANK, bank_vals) or 0
-            except Exception:
-                filled = 0
-            if filled:
-                log.info("form.post_offer_bank_filled", count=filled, row=row_number)
-                self._screenshot(cur, row_number, "post_offer_bank")
-                last_progress = time.time()
-                time.sleep(1)
-
-            # 2) A Continue / View / "Start Here!" CTA (searched across frames).
-            cta_fr, cta = (_find_cta() if clicks < max_clicks else (None, ""))
-            if cta_fr is not None:
-                here = ((cur.url or ""), cta)
-                if here == last_click:
-                    # Same button on the same page as last time — the previous
-                    # click didn't advance, so stop rather than spam it.
-                    log.info("form.post_offer_no_progress", button=cta, row=row_number)
-                    break
-                last_click = here
-                clicks += 1
-                last_progress = time.time()
-                log.info("form.post_offer_continue", button=cta, row=row_number)
-                new_tab = None
-                try:
-                    with ctx.expect_page(timeout=8000) as pinfo:
-                        cta_fr.evaluate(self._JS_CLICK_CONTINUE, False)   # actually click
-                    new_tab = pinfo.value
-                except Exception:
-                    new_tab = None           # no popup — navigated in place
-                if new_tab is not None:
-                    # The offer opened in its own window ("results will open in a
-                    # new window") — that's the destination.  Follow it, give it
-                    # time to load (it's often an interstitial that then redirects
-                    # to the lender), and STOP; do not drill into the advertiser's
-                    # own application funnel.
-                    cur = new_tab
-                    log.info("form.post_offer_tab", url=(cur.url or "")[:80], row=row_number)
-                    settle = float(self._delays.get("offer_load_wait", 6))
-                    for state in ("domcontentloaded", "load", "networkidle"):
-                        try:
-                            cur.wait_for_load_state(state, timeout=20000)
-                        except Exception:
-                            pass
-                    try:
-                        cur.bring_to_front()
-                    except Exception:
-                        pass
-                    time.sleep(settle)
-                    # In case it redirected to the lender during the settle, wait
-                    # for that page to load too before finishing.
-                    for state in ("domcontentloaded", "networkidle"):
-                        try:
-                            cur.wait_for_load_state(state, timeout=15000)
-                        except Exception:
-                            pass
-                    log.info("form.post_offer_loaded", url=(cur.url or "")[:80], row=row_number)
-                    break
-                # In-place navigation (a Continue/Submit on the aggregator) —
-                # wait for it and keep going through the flow.
-                for state in ("domcontentloaded", "load"):
-                    try:
-                        cur.wait_for_load_state(state, timeout=15000)
-                    except Exception:
-                        pass
-                time.sleep(2)
-                continue
-
-            # 3) No CTA yet.  If the offers page is still searching / connecting
-            #    ("Searching for the best offers…"), keep waiting for the cards.
-            if st.get("processing"):
-                if time.time() - proc_logged > 15:
-                    log.info("form.post_offer_processing", row=row_number)
-                    proc_logged = time.time()
-                time.sleep(3)
-                continue
-
-            # 4) Not processing and nothing to click — give ad-loaded cards time
-            #    to render, then finish if still nothing after a while.
-            if not filled and time.time() - last_progress > 45:
-                break
-            time.sleep(2)
-
-        self._screenshot(cur, row_number, "post_offer_final")
-        log.info("form.post_offer_done", clicks=clicks, row=row_number)
+    def _still_on_offer_origin(self, page: Page) -> bool:
+        try:
+            url = (page.url or "").lower()
+        except Exception:
+            return False
+        return any(h in url for h in (
+            "simplelendingdirect.com", "exabucks.com", "simacash.com",
+            "dynamicformrequest.com",
+            "happyloans.net", "rndframe.com",
+        ))
 
     def _classify_error(self, exc: Exception) -> str:
         msg = str(exc).lower()
