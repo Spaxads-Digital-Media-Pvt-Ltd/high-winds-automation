@@ -11,6 +11,7 @@ Playwright, Flask, or the sheet — the engine threads call into it.
 """
 from __future__ import annotations
 
+import random
 import threading
 from dataclasses import dataclass
 from datetime import datetime, time as dtime, timedelta
@@ -56,6 +57,11 @@ class HourlySlot:
     is_peak: bool
     capacity_pct: float          # total_planned / (realistic_max * num_offers) * 100
     fraction: float = 1.0        # proration for a partial first/last hour
+    release_plan: dict = None    # offer_id -> sorted random offsets (sec from slot start)
+
+    def __post_init__(self):
+        if self.release_plan is None:
+            self.release_plan = {}
 
 
 # ── Distribution helper ─────────────────────────────────────────────────────
@@ -220,6 +226,7 @@ class LeadPacer:
             budgets = {o: offer_alloc[o][si] for o in self.offers}
             total_planned = sum(budgets.values())
             cap_total = cap * self.num_offers
+            slot_secs = (s["end"] - s["start"]).total_seconds()
             slots.append(HourlySlot(
                 hour_start=s["start"], hour_end=s["end"],
                 offer_budgets=budgets,
@@ -229,8 +236,21 @@ class LeadPacer:
                 is_peak=s["is_peak"],
                 capacity_pct=round(total_planned / cap_total * 100, 1) if cap_total else 0.0,
                 fraction=round(s["fraction"], 3),
+                release_plan={oid: self._build_release_plan(oid, slot_secs, budgets[oid]) for oid in self.offers},
             ))
         return slots
+
+    # randomized release plan generation
+
+    def _build_release_plan(self, offer_id, slot_secs, budget):
+        """Return sorted random offsets (seconds from slot start).
+        Uses random.uniform across the full slot duration so leads land
+        at unpredictable times with no fixed gap pattern."""
+        if budget <= 0:
+            return []
+        if slot_secs <= 0:
+            return [0.0] * budget
+        return sorted(random.uniform(0, slot_secs) for _ in range(budget))
 
     # ── feasibility (spec step 2) ─────────────────────────────────────────────
 
@@ -296,21 +316,25 @@ class LeadPacer:
             offset = self._stagger_offset_seconds(offer_id)
             return (3600.0 - offset) / budget
 
-    def get_wait_seconds(self, offer_id: str, dt: Optional[datetime] = None) -> Optional[float]:
-        """Seconds to wait before releasing this offer's next lead.
+    def get_wait_seconds(self, offer_id: str, dt=None) -> float | None:
+        """Wait for the next random release offset in the current slot.
 
-        Auto-paces against the plan's cumulative-release curve:
-          • behind  (released < what the plan says should be out by now) → 0 → release
-                     immediately so the offer catches up (pace up);
-          • ahead/on-track → wait until the curve reaches released+1 (slow down).
-        This guarantees the offer's defined leads are filled by ``end_time``.
-        Returns None when this offer is finished or the window has closed."""
+        Uses pre-generated random offsets per slot. The engine waits
+        until the next random offset time arrives, then releases immediately.
+        More leads = tighter spread, fewer leads = wider random spread.
+
+        Strict: a slot's own release plan is a hard cap — once it is used
+        up this offer waits for the next slot with budget, and is never
+        allowed to spill extra leads into a slot beyond what was planned.
+
+        Returns None when this offer is finished, has no more budget
+        anywhere, or the window has closed."""
         now = self._aware(dt) if dt else self._now()
         with self._lock:
             target_total = self.offer_leads.get(offer_id, 0)
             released = self._total_released(offer_id)
             if released >= target_total:
-                return None  # this offer is done
+                return None
             if now >= self.end_time:
                 return None
             if now < self.start_time:
@@ -319,26 +343,22 @@ class LeadPacer:
             if idx is None:
                 return None
             slot = self.slots[idx]
-            budget = slot.offer_budgets.get(offer_id, 0)
-            cum_before = sum(self.slots[j].offer_budgets.get(offer_id, 0) for j in range(idx))
-            slot_secs = (slot.hour_end - slot.hour_start).total_seconds()
-            elapsed = (now - slot.hour_start).total_seconds()
-            # How many leads the plan says should already be released by `now`.
-            target_now = cum_before + (budget * (elapsed / slot_secs) if slot_secs > 0 else 0)
-            if released < target_now:
-                return 0.0  # behind → pace up, release now
-            # On track / ahead → time until the curve reaches the next lead.
-            needed_in_hour = (released + 1) - cum_before
-            if budget > 0 and needed_in_hour <= budget:
-                t_due = slot.hour_start + timedelta(seconds=(needed_in_hour / budget) * slot_secs)
-                return max(0.0, (t_due - now).total_seconds())
-            # Current hour is exhausted for this offer; wait for the next hour
-            # that still carries budget.
+            plan = slot.release_plan.get(offer_id, [])
+            released_in_slot = slot.offer_released.get(offer_id, 0)
+
+            if released_in_slot < len(plan):
+                next_offset = plan[released_in_slot]
+                slot_elapsed = (now - slot.hour_start).total_seconds()
+                return max(0.0, next_offset - slot_elapsed)
+
+            # This slot's planned budget for this offer is used up. Never
+            # release more than planned here — wait for the next slot that
+            # still carries budget for this offer.
             if self._future_budget(offer_id, idx) > 0:
                 return max(0.0, (slot.hour_end - now).total_seconds())
-            # No future budget but offer still owes leads (plan was clamped /
-            # infeasible) → release the remainder now to honour the defined total.
-            return 0.0
+            # No slot anywhere has remaining budget for this offer — stop
+            # rather than overshoot any slot's plan.
+            return None
 
     def can_proceed(self, offer_id: str, dt: Optional[datetime] = None) -> bool:
         return self.get_wait_seconds(offer_id, dt) is not None
